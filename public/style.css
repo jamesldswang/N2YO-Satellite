@@ -62,6 +62,9 @@ button:hover { background: rgba(255, 255, 255, .13); }
 .segmented button:last-child { border-radius: 0 6px 6px 0; border-left: 0; }
 .segmented button.active { background: var(--accent); color: #17130a; font-weight: 600; }
 #clock.sim { color: var(--accent); }
+.starlink { display: flex; align-items: center; gap: 8px; }
+#starlink-toggle[aria-pressed="true"] { background: #d9f1ff; color: #0b1622; font-weight: 600; }
+#starlink-info { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .sim { display: flex; align-items: center; gap: 8px; }
 #sim-toggle[aria-pressed="true"] { background: var(--accent); color: #17130a; font-weight: 600; }
 #sim-speed { width: 140px; accent-color: var(--accent); }

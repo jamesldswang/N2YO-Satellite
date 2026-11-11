@@ -11,9 +11,11 @@ description: 修改、測試「台灣上空衛星」網頁（D:\Personal_Git\sat
 
 | 檔案 | 內容 |
 |------|------|
-| `server.js` | 靜態伺服器 + `/api/config`、`/api/positions/:id`、`/api/tle/:id`、`/api/passes/radio|visual/:id`（N2YO 過境預報，只給測試工具用，快取 1 小時）。觀測點 `OBSERVER`、快取（`cached()`）、版號從 `package.json` 讀 |
+| `server.js` | 靜態伺服器 + `/api/starlink`（CelesTrak 星鏈 TLE，存在 `.cache/`）、`/api/config`、`/api/positions/:id`、`/api/tle/:id`、`/api/passes/radio|visual/:id`（N2YO 過境預報，只給測試工具用，快取 1 小時）。觀測點 `OBSERVER`、快取（`cached()`）、版號從 `package.json` 讀 |
 | `public/app.js` | **前端全部邏輯**：場景、地球 shader、觀測點座標系、衛星資料抓取、位置計算、清單、視角切換、加速模擬 |
 | `public/models.js` | 衛星 3D 模型（ES module）：`makeSatModel(kind)`、`modelKind(id, satrec)`、`setModelLit(g, lit)`、`disposeModel(g)`。模型座標 +X 側向、+Y 天頂、+Z 前進方向，建好後自動縮放到最長邊 = 1 |
+| `public/starlink.js` | 星鏈圖層 `StarlinkLayer`（ES module）：`enable()`、`disable()`、每幀 `update(ms, up, fast)`。Points 一個 draw call 畫上萬顆 |
+| `public/starlink-worker.js` | Web Worker：解析整份星鏈 TLE，`tick` 時算出全部的場景座標位置和速度（Float32Array，用 transfer 傳回） |
 | `public/passes.js` | 過境預報演算法 `SatPasses.compute()`。一般 script（不是 module），掛在全域，**Web Worker 和 `tools/check-passes.js` 共用**，所以不能用 DOM、不能用 import |
 | `public/passes-worker.js` | Web Worker：`importScripts` 載入 satellite.js 和 passes.js，算完 postMessage 回主執行緒 |
 | `public/index.html` | 頁面骨架；importmap 載入 three@0.170.0，`<script>` 載入 satellite.js@5.0.0 |
@@ -75,6 +77,14 @@ description: 修改、測試「台灣上空衛星」網頁（D:\Personal_Git\sat
   - 演算法：30 秒間隔掃描仰角、二分法找升起和落下（1 秒精度）、三分搜尋找最高點。週期超過 1300 分鐘當成同步衛星，不找過境。
   - 肉眼可見 = 衛星被太陽照到（圓柱形地影模型）＋觀測點太陽仰角低於 −6°＋衛星仰角 ≥ 10°。N2YO 日落後 0–6° 也算可見，這是已知差異，不是 bug。
   - N2YO 的過境時間是 5 秒取樣，接近天頂的過境它的最高仰角會偏低 1–2°，比對時不要以為是我們錯。
+- **星鏈**：
+  - 資料來源是 CelesTrak `gp.php?GROUP=starlink&FORMAT=tle`（約 1 萬顆、1.8 MB），不是 N2YO。**CelesTrak 2 小時內重複下載會回 HTTP 200 加一段文字說明（不是 TLE）**，所以 `server.js` 用 `looksLikeTle()` 判斷，失敗就保留舊資料、30 分鐘後才再試；資料存在 `.cache/starlink.tle`（gitignore、不打包），重啟也不重抓，2.5 小時後才更新。**開發測試不要反覆打 CelesTrak**，會被擋（也可能被封 IP）。
+  - 每次成功下載由 `archiveStarlink()` 另存 `.cache/starlink-history/<UTC 時間>Z.tle.gz`，超過 `STARLINK_KEEP_DAYS`（預設 30）天的刪掉。`.cache/starlink.tle` 存在後，伺服器每 10 分鐘呼叫一次 `getStarlink()`，到期就在背景更新，所以網頁沒開也會累積備份。測試備份邏輯時把 `server.js` 複製到 scratchpad、mock `global.fetch`，不要碰專案的 `.cache/`。
+  - 要測畫面又不想打 CelesTrak：暫時在 `.cache/starlink.tle` 放自己產生的假星座 TLE（例如照 Walker 星座改 RAAN、平近點角），**測完一定要刪掉並重啟伺服器**（記憶體裡也有一份），不然會一直顯示假資料到 2.5 小時後。
+  - Worker 每次算全部約 1 萬顆要 150–200 毫秒；即時模式每秒算一次，加速模擬每 0.4 秒一次，中間每幀用速度外插（10 秒誤差約 0.4 公里）。跳時間超過 5 分鐘先隱藏，等新結果。
+  - 位置用 Bowring 公式轉成大地緯度和高度，和其他衛星的 `geoToVec` 一致（直接用地心座標會差 10–20 公里，從地面看約 2°）。
+  - 「在台灣地平線上」用 `p·up > 1` 判斷（地球半徑 = 1）。
+  - 開關存在 localStorage `starlink-enabled`，網址 `?starlink=1` 也能開。
 - **衛星模型**：
   - 每顆衛星有一個模型（`s.model`）加一個清單顏色的圓圈 sprite（`s.sprite`）。`placeModel()` 每幀設定位置、朝向、大小、明暗，並回傳模型在畫面上的像素大小，圓圈依此調整。
   - 大小：固定約 `MODEL_PX` 像素，但不超過軌道高度的 1.6 倍，避免縮小畫面時低軌衛星模型插進地球。
@@ -97,4 +107,5 @@ description: 修改、測試「台灣上空衛星」網頁（D:\Personal_Git\sat
 - **標籤**：`makeLabel()`、`placeLabel()`、`hiddenByEarth()`、`updateLabels()`。
 - **模擬**：`sim`（`null` 或 `{ fromSim, fromReal, speed }`）、`clockMs()`、`setSim(speed | null, atMs?)`（`atMs` 指定從哪個時刻開始）。
 - **過境預報**：`markPassesDirty()`、`updatePasses()`（排程計算）、`renderPasses()`、`passRow()`、`dayHeading()`、`simulatePass(id, startMs)`、`setTab('list' | 'passes')`。結果在 `passResults`（`[{ id, geo, el, az, passes: [{ start, end, maxTime, maxEl, startAz, maxAz, endAz, visible, visStart, visEnd, visMaxEl }] }]`，時間都是毫秒）。
+- **星鏈**：`starlink`（`StarlinkLayer`）、`setStarlink(on)`、`renderStarlinkInfo()`。
 - **主迴圈**：`frame()`（requestAnimationFrame）、`tickSlow()`（每 250 毫秒：時鐘、太陽、軌道線、清單、poll）。

@@ -6,6 +6,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const util = require('util');
+const zlib = require('zlib');
 
 const ENV_FILE = path.join(__dirname, '.env');
 try { process.loadEnvFile(ENV_FILE); } catch { /* .env is optional */ }
@@ -122,6 +123,92 @@ function getPasses(kind, id) {
   });
 }
 
+// Starlink: thousands of satellites, far beyond N2YO's quota, so the whole
+// constellation's TLEs come from CelesTrak in one file (no key needed).
+// CelesTrak updates it every 2 hours and refuses a repeat download before
+// then (HTTP 200 with a plain-text notice), so the file is kept on disk and
+// survives restarts; a refused or failed download keeps the old copy.
+const STARLINK_URL = 'https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=tle';
+const CACHE_DIR = path.join(__dirname, '.cache');
+const STARLINK_FILE = path.join(CACHE_DIR, 'starlink.tle');
+const STARLINK_TTL = 2.5 * 3600e3;
+const STARLINK_RETRY = 30 * 60e3;
+let starlink = null;           // { text, fetchedAt }
+let starlinkError = null;
+let starlinkNextTry = 0;
+let starlinkLoading = null;
+
+// Every successful download is also kept as a gzipped, timestamped copy in
+// .cache/starlink-history/ (UTC, e.g. 2026-11-11T08-41Z.tle.gz, ~0.4 MB),
+// for replaying past times later. Copies older than STARLINK_KEEP_DAYS go.
+const HISTORY_DIR = path.join(CACHE_DIR, 'starlink-history');
+const STARLINK_KEEP_DAYS = Number(process.env.STARLINK_KEEP_DAYS) || 30;
+
+function archiveStarlink(text, fetchedAt) {
+  try {
+    fs.mkdirSync(HISTORY_DIR, { recursive: true });
+    const stamp = new Date(fetchedAt).toISOString().slice(0, 16).replace(':', '-');
+    fs.writeFileSync(path.join(HISTORY_DIR, `${stamp}Z.tle.gz`), zlib.gzipSync(text));
+    const cutoff = Date.now() - STARLINK_KEEP_DAYS * 86400e3;
+    for (const name of fs.readdirSync(HISTORY_DIR)) {
+      const file = path.join(HISTORY_DIR, name);
+      if (name.endsWith('.tle.gz') && fs.statSync(file).mtimeMs < cutoff) fs.unlinkSync(file);
+    }
+  } catch (err) {
+    console.log(`星鏈歷史備份失敗：${err.message}`);
+  }
+}
+
+const looksLikeTle = (text) => /^1 [0-9 ]{5}/m.test(text) && /^2 [0-9 ]{5}/m.test(text);
+
+async function refreshStarlink() {
+  try {
+    let res;
+    try {
+      res = await fetch(STARLINK_URL, { signal: AbortSignal.timeout(60000) });
+    } catch {
+      throw new Error('無法連線到 CelesTrak');
+    }
+    const text = await res.text();
+    if (!res.ok || !looksLikeTle(text)) {
+      throw new Error(/not updated/i.test(text)
+        ? 'CelesTrak 每 2 小時才更新一次，剛下載過，請稍後再試'
+        : `CelesTrak 回應錯誤（HTTP ${res.status}）`);
+    }
+    starlink = { text, fetchedAt: Date.now() };
+    starlinkError = null;
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    fs.writeFileSync(`${STARLINK_FILE}.tmp`, text);
+    fs.renameSync(`${STARLINK_FILE}.tmp`, STARLINK_FILE);
+    archiveStarlink(text, starlink.fetchedAt);
+  } catch (err) {
+    starlinkError = err.message;
+    starlinkNextTry = Date.now() + STARLINK_RETRY;
+  }
+}
+
+async function getStarlink() {
+  if (!starlink) {
+    try {
+      const text = fs.readFileSync(STARLINK_FILE, 'utf8');
+      if (looksLikeTle(text)) starlink = { text, fetchedAt: fs.statSync(STARLINK_FILE).mtimeMs };
+    } catch { /* no saved copy yet */ }
+  }
+  if ((!starlink || Date.now() - starlink.fetchedAt > STARLINK_TTL) && Date.now() >= starlinkNextTry) {
+    starlinkLoading ??= refreshStarlink().finally(() => { starlinkLoading = null; });
+    if (!starlink) await starlinkLoading; // first time: wait; otherwise refresh in the background
+  }
+  if (!starlink) throw new ApiError(503, starlinkError || '星鏈資料下載中');
+  return starlink;
+}
+
+// Once Starlink has been used (a saved copy exists), keep downloading in the
+// background while the server runs, so the history keeps growing even with
+// the page closed. getStarlink() itself respects the 2.5 h TTL and retry delay.
+setInterval(() => {
+  if (starlink || fs.existsSync(STARLINK_FILE)) getStarlink().catch(() => {});
+}, 10 * 60e3);
+
 function sendJson(res, status, data) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(data));
@@ -147,6 +234,18 @@ const server = http.createServer(async (req, res) => {
 
   if (pathname === '/api/config') {
     sendJson(res, 200, { observer: OBSERVER, hasKey: Boolean(apiKey()), version: VERSION });
+    return;
+  }
+  if (pathname === '/api/starlink') {
+    try {
+      const { text, fetchedAt } = await getStarlink();
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Fetched-At': String(Math.round(fetchedAt)),
+      });
+      res.end(text);
+    } catch (err) {
+      sendJson(res, err.status || 500, { error: err.status ? err.message : '伺服器錯誤' });
+    }
     return;
   }
   const passMatch = pathname.match(/^\/api\/passes\/(radio|visual)\/(\d{1,6})$/);

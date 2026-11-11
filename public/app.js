@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { makeSatModel, modelKind, setModelLit, disposeModel } from './models.js';
+import { StarlinkLayer } from './starlink.js';
 
 const sgp4 = window.satellite;
 
@@ -888,11 +889,31 @@ function tickSlow() {
   updateHint();
   poll();
   updatePasses();
+  renderStarlinkInfo();
 }
+
+// Starlink layer: off by default; the choice is remembered in this browser.
+const starlink = new StarlinkLayer(scene);
+const STARLINK_KEY = 'starlink-enabled';
+function setStarlink(on) {
+  if (on) starlink.enable(); else starlink.disable();
+  $('starlink-toggle').setAttribute('aria-pressed', String(on));
+  $('starlink-info').hidden = !on;
+  try { localStorage.setItem(STARLINK_KEY, on ? '1' : '0'); } catch { /* optional */ }
+  renderStarlinkInfo();
+}
+function renderStarlinkInfo() {
+  if (!starlink.enabled) return;
+  const text = starlink.status
+    || `${starlink.count.toLocaleString()} 顆 · 台灣地平線上 ${starlink.above.toLocaleString()} 顆`;
+  if ($('starlink-info').textContent !== text) $('starlink-info').textContent = text;
+}
+$('starlink-toggle').addEventListener('click', () => setStarlink(!starlink.enabled));
 
 function frame() {
   const ms = clockMs();
   for (const s of sats.values()) updateSat(s, ms);
+  starlink.update(ms, up, Boolean(sim) && sim.speed > 1);
   if (view === 'space') controls.update(); else aimSky();
   updateLabels();
   renderer.render(scene, camera);
@@ -939,6 +960,9 @@ async function start() {
   const params = new URLSearchParams(location.search);
   setView(params.get('view') === 'sky' ? 'sky' : 'space');
   if (params.get('tab') === 'passes') setTab('passes');
+  let starlinkOn = params.get('starlink') === '1';
+  try { starlinkOn ||= localStorage.getItem(STARLINK_KEY) === '1'; } catch { /* optional */ }
+  if (starlinkOn) setStarlink(true);
 
   loadIds().forEach(createSat);
   renderCount();
