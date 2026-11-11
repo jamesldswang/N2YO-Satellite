@@ -47,7 +47,7 @@ button:hover { background: rgba(255, 255, 255, .13); }
 .bar {
   position: fixed; top: 12px; left: 12px;
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
-  max-width: calc(100vw - 24px);
+  max-width: calc(100vw - 24px - 310px - 12px); /* 不要鑽到右邊面板底下，空間不夠就換行 */
   padding: 8px 12px;
   background: var(--panel);
   border: 1px solid var(--line);
@@ -64,7 +64,9 @@ button:hover { background: rgba(255, 255, 255, .13); }
 #clock.sim { color: var(--accent); }
 .starlink { display: flex; align-items: center; gap: 8px; }
 #starlink-toggle[aria-pressed="true"] { background: #d9f1ff; color: #0b1622; font-weight: 600; }
-#starlink-info { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+#clouds-toggle[aria-pressed="true"] { background: #eef2f6; color: #0b1622; font-weight: 600; }
+#clouds-info.stale { color: var(--accent); }
+#starlink-info, #clouds-info { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .sim { display: flex; align-items: center; gap: 8px; }
 #sim-toggle[aria-pressed="true"] { background: var(--accent); color: #17130a; font-weight: 600; }
 #sim-speed { width: 140px; accent-color: var(--accent); }
@@ -155,5 +157,6 @@ button:hover { background: rgba(255, 255, 255, .13); }
 
 @media (max-width: 720px) {
   #panel { top: auto; left: 12px; right: 12px; width: auto; height: 36vh; }
+  .bar { max-width: calc(100vw - 24px); } /* 面板移到下方了，工具列可以用滿寬度 */
   #hint { display: none; }
 }

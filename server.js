@@ -209,6 +209,59 @@ setInterval(() => {
   if (starlink || fs.existsSync(STARLINK_FILE)) getStarlink().catch(() => {});
 }, 10 * 60e3);
 
+// Cloud imagery: CWA open data O-B0033-001, the Himawari-9 full-disk infrared
+// (B13) image, 5500×5500 in the satellite's own geostationary projection
+// (140.7°E), with no coastlines or text drawn on it. The opendata API only
+// redirects to this public S3 bucket, so no CWA key is needed. A new image
+// arrives every 10 minutes; a failed check keeps the previous image.
+const CLOUDS_META = 'https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Observation/O-B0033-001.json';
+const CLOUDS_HOST = 'https://cwaopendata.s3.ap-northeast-1.amazonaws.com/';
+const CLOUDS_CHECK = 10 * 60e3;
+let clouds = null;             // { image: Buffer, obsTime: ISO string, checkedAt }
+let cloudsError = null;
+let cloudsLoading = null;
+
+async function refreshClouds() {
+  try {
+    let meta;
+    try {
+      meta = await (await fetch(CLOUDS_META, { signal: AbortSignal.timeout(15000) })).json();
+    } catch {
+      throw new Error('無法取得氣象署雲圖資訊');
+    }
+    const ds = meta?.cwaopendata?.dataset;
+    const obsTime = ds?.ObsTime?.Datetime;
+    const url = ds?.Resource?.ProductURL;
+    if (!obsTime || typeof url !== 'string' || !url.startsWith(CLOUDS_HOST)) throw new Error('氣象署雲圖資訊格式不符');
+    if (!clouds || clouds.obsTime !== obsTime) {
+      let res;
+      try {
+        res = await fetch(url, { signal: AbortSignal.timeout(60000) });
+      } catch {
+        throw new Error('無法下載氣象署雲圖');
+      }
+      const image = Buffer.from(await res.arrayBuffer());
+      if (!res.ok || image[0] !== 0xff || image[1] !== 0xd8) throw new Error(`氣象署雲圖下載失敗（HTTP ${res.status}）`);
+      clouds = { image, obsTime, checkedAt: Date.now() };
+    } else {
+      clouds.checkedAt = Date.now();
+    }
+    cloudsError = null;
+  } catch (err) {
+    cloudsError = err.message;
+    if (clouds) clouds.checkedAt = Date.now(); // keep the old image; try again next period
+  }
+}
+
+async function getClouds() {
+  if (!clouds || Date.now() - clouds.checkedAt > CLOUDS_CHECK) {
+    cloudsLoading ??= refreshClouds().finally(() => { cloudsLoading = null; });
+    if (!clouds) await cloudsLoading; // first time: wait; otherwise refresh in the background
+  }
+  if (!clouds) throw new ApiError(503, cloudsError || '雲圖下載中');
+  return clouds;
+}
+
 function sendJson(res, status, data) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(data));
@@ -243,6 +296,16 @@ const server = http.createServer(async (req, res) => {
         'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Fetched-At': String(Math.round(fetchedAt)),
       });
       res.end(text);
+    } catch (err) {
+      sendJson(res, err.status || 500, { error: err.status ? err.message : '伺服器錯誤' });
+    }
+    return;
+  }
+  if (pathname === '/api/clouds') {
+    try {
+      const { image, obsTime } = await getClouds();
+      res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-store', 'X-Obs-Time': obsTime });
+      res.end(image);
     } catch (err) {
       sendJson(res, err.status || 500, { error: err.status ? err.message : '伺服器錯誤' });
     }

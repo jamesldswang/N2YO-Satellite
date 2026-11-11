@@ -16,6 +16,7 @@ description: 修改、測試「台灣上空衛星」網頁（D:\Personal_Git\sat
 | `public/models.js` | 衛星 3D 模型（ES module）：`makeSatModel(kind)`、`modelKind(id, satrec)`、`setModelLit(g, lit)`、`disposeModel(g)`。模型座標 +X 側向、+Y 天頂、+Z 前進方向，建好後自動縮放到最長邊 = 1 |
 | `public/starlink.js` | 星鏈圖層 `StarlinkLayer`（ES module）：`enable()`、`disable()`、每幀 `update(ms, up, fast)`。Points 一個 draw call 畫上萬顆 |
 | `public/starlink-worker.js` | Web Worker：解析整份星鏈 TLE，`tick` 時算出全部的場景座標位置和速度（Float32Array，用 transfer 傳回） |
+| `public/clouds.js` | 衛星雲圖圖層 `CloudLayer`（ES module）：`enable()`、`disable()`、`load()`；`status`、`obsTime`。比地球大一點的球，shader 用靜止衛星公式取樣 |
 | `public/passes.js` | 過境預報演算法 `SatPasses.compute()`。一般 script（不是 module），掛在全域，**Web Worker 和 `tools/check-passes.js` 共用**，所以不能用 DOM、不能用 import |
 | `public/passes-worker.js` | Web Worker：`importScripts` 載入 satellite.js 和 passes.js，算完 postMessage 回主執行緒 |
 | `public/index.html` | 頁面骨架；importmap 載入 three@0.170.0，`<script>` 載入 satellite.js@5.0.0 |
@@ -92,6 +93,15 @@ description: 修改、測試「台灣上空衛星」網頁（D:\Personal_Git\sat
   - 地影：場景沒有投影，`setModelLit()` 依圓柱形地影模型把材質調暗到 30%，所以每個模型要有自己的材質。
   - 光源（`sunLight`、環境光）只影響模型，地球是自己的 shader。
   - 畫面檢查模型外形時，可以暫時在 `public/` 放一個只載入 `models.js` 的測試頁截圖，**用完要刪掉**，不要進 git 和打包。
+- **衛星雲圖**：
+  - 資料是氣象署 O-B0033-001（向日葵 9 號全盤面 B13 紅外線黑白，5500×5500，無海岸線文字）。opendata API 只是 302 轉到公開 S3（`cwaopendata.s3.ap-northeast-1.amazonaws.com/Observation/O-B0033-001.json` 和 `.jpg`），**不用授權碼**，S3 有 CORS `*`。`server.js` 的 `getClouds()` 每 10 分鐘看一次 json 的 `ObsTime`，換了才下載圖（約 3.4 MB），失敗保留舊圖；`/api/clouds` 回傳圖片，觀測時間放在 `X-Obs-Time` header。
+  - 圖是靜止衛星投影（衛星經度 140.7°E），用 CGMS LRIT/HRIT 規範的公式（CFAC = LFAC = 20466275、COFF = LOFF = 2750.5）換算，已用氣象署有畫海岸線的 O-C0042-001 驗證準到 1 像素。shader 裡 `uv = 0.5 + 掃描角(度) × 20466275 / 65536 / 5500`，`flipY = false`（ImageBitmap 不能翻轉）。
+  - 前端用 `createImageBitmap` 縮成 2750×2750 再當貼圖（原尺寸 RGBA 要 121 MB GPU 記憶體）。
+  - 亮度門檻 `smoothstep(0.38, 0.68)` 是實測調的：晴空海面約 0.24、台灣陸地 0.30、蒙古晴空陸地 0.42、華中雲帶 0.54。
+  - 氣象署其他雲圖：O-B0032-001～004 東亞 1200 px（**投影不是經緯度方格，不能直接貼**）、O-B0033-003 東亞 KMZ（經緯度瓦片 102–152°E、0–50°N，可貼但要解壓縮拼接）、O-C0042-001～008 全球／台灣 1200／800 px（有黃色海岸線和文字）。
+  - 雲球只畫正面，所以在台灣仰望視角（相機在球裡面）看不到，不會擋住衛星。
+  - 雲圖只有即時觀測：`renderCloudInfo()`（tickSlow 每 250 毫秒）比較 `clockMs()` 和 `clouds.obsTime`，差超過 `CLOUDS_STALE_MS`（1 小時）就把 `uniforms.opacity` 設 0.3、資訊改成黃字註明。
+  - 開關存在 localStorage `clouds-enabled`，網址 `?clouds=1` 也能開。
 - **瀏覽器記住的清單**（localStorage `tracked-satellites`）會蓋過 `DEFAULT_IDS`。
 - 這台電腦是 Windows，git 會出現 LF → CRLF 的警告，不影響。
 

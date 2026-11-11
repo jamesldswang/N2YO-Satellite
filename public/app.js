@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { makeSatModel, modelKind, setModelLit, disposeModel } from './models.js';
 import { StarlinkLayer } from './starlink.js';
+import { CloudLayer } from './clouds.js';
 
 const sgp4 = window.satellite;
 
@@ -890,6 +891,7 @@ function tickSlow() {
   poll();
   updatePasses();
   renderStarlinkInfo();
+  renderCloudInfo();
 }
 
 // Starlink layer: off by default; the choice is remembered in this browser.
@@ -909,6 +911,38 @@ function renderStarlinkInfo() {
   if ($('starlink-info').textContent !== text) $('starlink-info').textContent = text;
 }
 $('starlink-toggle').addEventListener('click', () => setStarlink(!starlink.enabled));
+
+// 氣象署衛星雲圖：預設關閉，開關記在這個瀏覽器。雲圖是即時觀測，加速模擬時不會跟著時間變。
+const clouds = new CloudLayer(scene, earthUniforms.sunDir);
+const CLOUDS_KEY = 'clouds-enabled';
+function setClouds(on) {
+  if (on) clouds.enable(); else clouds.disable();
+  $('clouds-toggle').setAttribute('aria-pressed', String(on));
+  $('clouds-info').hidden = !on;
+  try { localStorage.setItem(CLOUDS_KEY, on ? '1' : '0'); } catch { /* optional */ }
+  renderCloudInfo();
+}
+// 模擬時間和雲圖觀測時間差超過這麼多，雲就調淡並註明，避免被當成那個時刻的天氣
+const CLOUDS_STALE_MS = 3600e3;
+function renderCloudInfo() {
+  if (!clouds.enabled) return;
+  let text = clouds.status;
+  let stale = false;
+  if (!text && clouds.obsTime) {
+    const hm = clouds.obsTime.toLocaleTimeString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false, hour: '2-digit', minute: '2-digit' });
+    stale = Math.abs(clockMs() - clouds.obsTime.getTime()) > CLOUDS_STALE_MS;
+    if (stale) {
+      text = `雲圖為 ${hm} 的即時觀測，不隨模擬變化`;
+    } else {
+      const ago = Math.max(0, Math.round((Date.now() - clouds.obsTime.getTime()) / 60000));
+      text = `觀測 ${hm}（${ago} 分鐘前）`;
+    }
+  }
+  clouds.uniforms.opacity.value = stale ? 0.3 : 1;
+  $('clouds-info').classList.toggle('stale', stale);
+  if ($('clouds-info').textContent !== text) $('clouds-info').textContent = text;
+}
+$('clouds-toggle').addEventListener('click', () => setClouds(!clouds.enabled));
 
 function frame() {
   const ms = clockMs();
@@ -963,6 +997,9 @@ async function start() {
   let starlinkOn = params.get('starlink') === '1';
   try { starlinkOn ||= localStorage.getItem(STARLINK_KEY) === '1'; } catch { /* optional */ }
   if (starlinkOn) setStarlink(true);
+  let cloudsOn = params.get('clouds') === '1';
+  try { cloudsOn ||= localStorage.getItem(CLOUDS_KEY) === '1'; } catch { /* optional */ }
+  if (cloudsOn) setClouds(true);
 
   loadIds().forEach(createSat);
   renderCount();
