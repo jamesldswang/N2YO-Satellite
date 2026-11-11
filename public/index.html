@@ -35,13 +35,27 @@
   </header>
 
   <aside id="panel">
-    <h2>追蹤清單 <span id="count"></span></h2>
-    <ul id="list"></ul>
-    <form id="add">
-      <input id="add-id" inputmode="numeric" pattern="[0-9]{1,6}" placeholder="NORAD 編號" aria-label="NORAD 編號" required>
-      <button type="submit">加入</button>
-    </form>
-    <p id="quota"></p>
+    <div class="segmented tabs" role="tablist" aria-label="面板">
+      <button type="button" role="tab" data-tab="list" aria-selected="true" class="active">追蹤清單</button>
+      <button type="button" role="tab" data-tab="passes" aria-selected="false">過境預報</button>
+    </div>
+    <section id="tab-list" class="tab" role="tabpanel">
+      <p class="tab-head"><span id="count"></span></p>
+      <ul id="list"></ul>
+      <form id="add">
+        <input id="add-id" inputmode="numeric" pattern="[0-9]{1,6}" placeholder="NORAD 編號" aria-label="NORAD 編號" required>
+        <button type="submit">加入</button>
+      </form>
+      <p id="quota"></p>
+    </section>
+    <section id="tab-passes" class="tab" role="tabpanel" hidden>
+      <div class="tab-head">
+        <span id="pass-status"></span>
+        <label class="check"><input type="checkbox" id="visible-only"> 只看肉眼可見</label>
+      </div>
+      <ul id="passes"></ul>
+      <p class="note">未來 3 天、最高仰角 10° 以上，台灣時間。點一下會從過境前 1 分鐘開始模擬。</p>
+    </section>
   </aside>
 
   <p id="hint"></p>

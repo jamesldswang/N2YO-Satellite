@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { makeSatModel, modelKind, setModelLit, disposeModel } from './models.js';
 
 const sgp4 = window.satellite;
 
@@ -171,16 +172,24 @@ function buildObserver() {
   }
 }
 
-const dotTexture = (() => {
+// Colour ring around each model, so the list colours still match and a
+// satellite stays findable when its model is only a few pixels wide.
+const ringTexture = (() => {
   const c = document.createElement('canvas');
   c.width = c.height = 64;
   const g = c.getContext('2d');
-  g.fillStyle = 'rgba(255,255,255,.28)';
-  g.beginPath(); g.arc(32, 32, 31, 0, 7); g.fill();
-  g.fillStyle = '#fff';
-  g.beginPath(); g.arc(32, 32, 15, 0, 7); g.fill();
+  g.strokeStyle = '#fff';
+  g.lineWidth = 4;
+  g.beginPath(); g.arc(32, 32, 27, 0, 7); g.stroke();
   return new THREE.CanvasTexture(c);
 })();
+
+// Lights for the satellite models only; the Earth uses its own shader.
+const sunLight = new THREE.DirectionalLight(0xffffff, 2.6);
+scene.add(sunLight, new THREE.AmbientLight(0xffffff, 0.55));
+
+const MODEL_PX = 40, MODEL_PX_SELECTED = 60; // on-screen size of a model (longest side)
+const RING_MIN_PX = 16;
 
 const sats = new Map();
 let selectedId = null;
@@ -202,8 +211,12 @@ function createSat(id) {
   while (used.has(colorIndex) && colorIndex < COLORS.length - 1) colorIndex++;
   const color = new THREE.Color(COLORS[colorIndex]);
 
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: dotTexture, color, sizeAttenuation: false, transparent: true }));
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: ringTexture, color, sizeAttenuation: false, transparent: true, opacity: 0.7, depthWrite: false,
+  }));
   sprite.visible = false;
+  const model = makeSatModel(modelKind(id, null));
+  model.visible = false;
 
   const pathGeo = new THREE.BufferGeometry();
   pathGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(PATH_POINTS * 3), 3));
@@ -218,30 +231,34 @@ function createSat(id) {
   link.frustumCulled = false;
   link.visible = false;
 
-  scene.add(sprite, path, link);
+  scene.add(sprite, model, path, link);
 
   const label = makeLabel('', `#${id}`);
   label.addEventListener('click', () => select(id));
 
   const s = {
-    id, colorIndex, color, sprite, path, link, label,
+    id, colorIndex, color, sprite, model, path, link, label,
+    lastPos: new THREE.Vector3(), forward: new THREE.Vector3(),
     name: `#${id}`, samples: [], satrec: null, state: null, error: null,
     busy: false, nextFetch: 0, nextTle: 0, pathAt: -Infinity, row: null,
     pos: new THREE.Vector3(),
   };
   s.row = makeRow(s);
   sats.set(id, s);
+  markPassesDirty();
   return s;
 }
 
 function removeSat(s) {
-  scene.remove(s.sprite, s.path, s.link);
+  scene.remove(s.sprite, s.model, s.path, s.link);
   s.sprite.material.dispose();
+  disposeModel(s.model);
   s.path.geometry.dispose(); s.path.material.dispose();
   s.link.geometry.dispose(); s.link.material.dispose();
   s.label.remove();
   s.row.el.remove();
   sats.delete(s.id);
+  markPassesDirty();
   if (selectedId === s.id) select(null);
   saveIds();
   renderCount();
@@ -289,8 +306,18 @@ async function loadTle(s, now) {
     const { line1, line2 } = await api(`/api/tle/${s.id}`);
     if (!sats.has(s.id)) return;
     s.satrec = sgp4.twoline2satrec(line1, line2);
+    s.tle = { line1, line2 };
+    const kind = modelKind(s.id, s.satrec);
+    if (kind !== s.model.userData.kind) { // e.g. an added satellite turns out to be geostationary
+      scene.remove(s.model);
+      disposeModel(s.model);
+      s.model = makeSatModel(kind);
+      s.model.visible = false;
+      scene.add(s.model);
+    }
     s.nextTle = now + 6 * 3600;
     s.pathAt = -Infinity;
+    markPassesDirty();
   } catch { /* the orbit line is optional; the live position still works */ }
 }
 
@@ -350,12 +377,16 @@ function stateFromTle(s, ms) {
 function updateSat(s, ms) {
   s.state = sim ? stateFromTle(s, ms) : stateFromSamples(s, ms / 1000);
   if (!s.state) {
-    s.sprite.visible = s.link.visible = false;
+    s.sprite.visible = s.model.visible = s.link.visible = false;
     return;
   }
 
+  const selected = s.id === selectedId;
+  const modelPx = placeModel(s, selected);
   s.sprite.position.copy(s.pos);
-  s.sprite.scale.setScalar(s.id === selectedId ? 0.036 : 0.022);
+  // sizeAttenuation:false sprites are scaled in fractions of the viewport height.
+  s.sprite.scale.setScalar((Math.max(modelPx * 1.25, RING_MIN_PX)) / canvas.clientHeight);
+  s.sprite.material.opacity = selected ? 1 : 0.6;
   s.sprite.visible = true;
 
   const showLink = view === 'space' && s.state.el > 0;
@@ -366,6 +397,41 @@ function updateSat(s, ms) {
     p.setXYZ(1, s.pos.x, s.pos.y, s.pos.z);
     p.needsUpdate = true;
   }
+}
+
+// Orient the model like a real satellite (bottom toward Earth, nose along its
+// motion) and size it to a fixed number of pixels, since at true scale even
+// the ISS would be far smaller than a pixel.
+const mUp = new THREE.Vector3(), mRight = new THREE.Vector3(), mFwd = new THREE.Vector3(), mBasis = new THREE.Matrix4();
+function placeModel(s, selected) {
+  const m = s.model;
+  m.position.copy(s.pos);
+  mUp.copy(s.pos).normalize();
+  mFwd.copy(s.pos).sub(s.lastPos);
+  if (mFwd.lengthSq() > 1e-11 && mFwd.lengthSq() < 0.01) s.forward.copy(mFwd); // ignore jumps (sim seek)
+  s.lastPos.copy(s.pos);
+  mFwd.copy(s.forward).addScaledVector(mUp, -s.forward.dot(mUp));
+  if (mFwd.lengthSq() < 1e-14) {
+    // Not moving relative to the ground (geostationary) or no history yet: face east.
+    const lam = Math.atan2(-s.pos.z, s.pos.x);
+    mFwd.set(-Math.sin(lam), 0, -Math.cos(lam));
+  }
+  mFwd.normalize();
+  mRight.crossVectors(mUp, mFwd);
+  m.quaternion.setFromRotationMatrix(mBasis.makeBasis(mRight, mUp, mFwd));
+
+  const worldPerPx = (2 * camera.position.distanceTo(s.pos) * Math.tan((camera.fov * DEG) / 2)) / canvas.clientHeight;
+  // Cap at the orbit height so low-orbit models never sink into the Earth when zoomed out.
+  const altUnits = s.pos.length() - 1;
+  const scale = Math.min(worldPerPx * (selected ? MODEL_PX_SELECTED : MODEL_PX), Math.max(altUnits * 1.6, 0.004));
+  m.scale.setScalar(scale);
+
+  // Earth's shadow (cylinder model): dark when behind the Earth relative to the Sun.
+  const sun = earthUniforms.sunDir.value;
+  const d = s.pos.dot(sun);
+  setModelLit(m, d > 0 || mFwd.copy(s.pos).addScaledVector(sun, -d).lengthSq() > 1);
+  m.visible = true;
+  return scale / worldPerPx; // size on screen in pixels
 }
 
 const pathPoint = new THREE.Vector3();
@@ -631,8 +697,9 @@ window.addEventListener('resize', resize);
 
 // Simulation controls
 const simToggle = $('sim-toggle'), simSpeed = $('sim-speed'), simRate = $('sim-rate');
-function setSim(speed) { // null = back to live
-  sim = speed == null ? null : { fromSim: clockMs(), fromReal: Date.now(), speed };
+// speed null = back to live; atMs = simulated time to start from (default: carry on from now).
+function setSim(speed, atMs) {
+  sim = speed == null ? null : { fromSim: atMs ?? clockMs(), fromReal: Date.now(), speed };
   const on = Boolean(sim);
   simToggle.textContent = on ? '回到即時' : '加速模擬';
   simToggle.setAttribute('aria-pressed', String(on));
@@ -645,10 +712,171 @@ function setSim(speed) { // null = back to live
 simToggle.addEventListener('click', () => setSim(sim ? null : Number(simSpeed.value)));
 simSpeed.addEventListener('input', () => { if (sim) setSim(Number(simSpeed.value)); });
 
+// Pass predictions: computed by SGP4 in a Web Worker (passes-worker.js +
+// passes.js, shared with tools/check-passes.js), so no N2YO quota is used.
+const PASS_DAYS = 3;
+const PASS_MIN_EL = 10;
+const passWorker = new Worker('passes-worker.js');
+let passJob = 0, passBusy = false, passDirtyAt = 0, passFrom = null;
+let passResults = [], passError = null, passKey = '', passTab = false;
+
+function markPassesDirty() { if (!passDirtyAt) passDirtyAt = Date.now(); }
+
+passWorker.onmessage = (e) => {
+  passBusy = false;
+  if (e.data.job !== passJob) return;
+  passFrom = e.data.fromMs;
+  passResults = e.data.results;
+  passError = null;
+  passKey = '';
+  renderPasses();
+};
+passWorker.onerror = (e) => {
+  e.preventDefault();
+  passBusy = false;
+  passError = '過境預報計算失敗（需要網路載入 satellite.js）';
+  passKey = '';
+  renderPasses();
+};
+
+function updatePasses() {
+  const now = clockMs();
+  // Keep at least two days ahead, and recompute after the clock jumps backwards.
+  if (passFrom !== null && (now > passFrom + 864e5 || now < passFrom - 60e3)) markPassesDirty();
+  // Short debounce: TLEs for several satellites arrive one after another at start-up.
+  if (passDirtyAt && !passBusy && Date.now() - passDirtyAt > 800) {
+    passDirtyAt = 0;
+    passBusy = true;
+    passWorker.postMessage({
+      job: ++passJob,
+      sats: [...sats.values()].filter((s) => s.tle).map((s) => ({ id: s.id, ...s.tle })),
+      observer, fromMs: now, toMs: now + PASS_DAYS * 864e5, minEl: PASS_MIN_EL,
+    });
+  }
+  renderPasses();
+}
+
+const passDate = new Intl.DateTimeFormat('zh-TW', { timeZone: 'Asia/Taipei', month: 'numeric', day: 'numeric' });
+const passWeekday = new Intl.DateTimeFormat('zh-TW', { timeZone: 'Asia/Taipei', weekday: 'short' });
+const taipeiDay = (ms) => Math.floor((ms + 8 * 3600e3) / 864e5); // Taiwan has no DST
+function dayHeading(ms, now) {
+  const rel = ['今天', '明天', '後天'][taipeiDay(ms) - taipeiDay(now)] || '';
+  return `${rel} ${passDate.format(ms)} ${passWeekday.format(ms)}`.trim();
+}
+const passTime = new Intl.DateTimeFormat('zh-TW', { timeZone: 'Asia/Taipei', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+
+function passRow(s, cls, maxText) {
+  const el = document.createElement('li');
+  el.className = `pass ${cls}`;
+  const dot = document.createElement('span');
+  dot.className = 'dot';
+  dot.style.background = COLORS[s.colorIndex];
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = s.name;
+  const max = document.createElement('span');
+  max.className = 'max';
+  max.textContent = maxText;
+  const sub = document.createElement('span');
+  sub.className = 'sub';
+  const badges = document.createElement('span');
+  badges.className = 'sub badges';
+  el.append(dot, name, max, sub, badges);
+  return { el, sub, badges, max };
+}
+function badge(cls, text) {
+  const b = document.createElement('span');
+  b.className = `badge ${cls}`;
+  b.textContent = text;
+  return b;
+}
+
+function renderPasses() {
+  if (!passTab) return;
+  const now = clockMs();
+  const visibleOnly = $('visible-only').checked;
+  const geo = [], items = [];
+  for (const r of passResults) {
+    const s = sats.get(r.id);
+    if (!s) continue;
+    if (r.geo) { if (r.el > 0) geo.push({ s, r }); continue; }
+    for (const p of r.passes) {
+      if (p.end > now && (!visibleOnly || p.visible)) items.push({ s, p, live: p.start <= now });
+    }
+  }
+  items.sort((a, b) => a.p.start - b.p.start);
+  const noTle = [...sats.values()].filter((s) => !s.tle).length;
+
+  // Rebuild only when something visible changed, so hover and clicks are not disturbed.
+  const key = [taipeiDay(now), visibleOnly, passBusy, passError, noTle, ...geo.map(({ s }) => s.id + s.name),
+    ...items.map(({ s, p, live }) => `${s.id}:${s.name}:${p.start}:${live}`)].join('|');
+  if (key === passKey) return;
+  passKey = key;
+
+  $('pass-status').textContent = passError
+    || (passBusy && !passResults.length ? '計算中…'
+      : `共 ${items.length} 次${visibleOnly ? '肉眼可見的' : ''}過境${noTle ? `（${noTle} 顆還沒有軌道資料）` : ''}`);
+
+  const list = $('passes');
+  list.replaceChildren();
+  for (const { s, r } of geo) {
+    const row = passRow(s, 'geo', `仰角 ${r.el.toFixed(0)}°`);
+    row.sub.textContent = `同步衛星，一直在天上 · 方位 ${r.az.toFixed(0)}° ${compassName(r.az)}`;
+    list.append(row.el);
+  }
+  let day = null;
+  for (const { s, p, live } of items) {
+    const heading = dayHeading(p.start, now);
+    if (heading !== day) {
+      day = heading;
+      const h = document.createElement('li');
+      h.className = 'day';
+      h.textContent = heading;
+      list.append(h);
+    }
+    const row = passRow(s, live ? 'now' : '', `最高 ${p.maxEl.toFixed(0)}°`);
+    row.sub.textContent = `${passTime.format(p.start)}–${passTime.format(p.end)} · `
+      + `${compassName(p.startAz)} → ${compassName(p.endAz)} · ${Math.max(1, Math.round((p.end - p.start) / 60e3))} 分鐘`;
+    if (live) row.badges.append(badge('live', '過境中'));
+    if (p.visible) {
+      row.badges.append(badge('vis', `肉眼可見 ${passTime.format(p.visStart)}–${passTime.format(p.visEnd)}`));
+    }
+    row.el.tabIndex = 0;
+    row.el.title = '從過境前 1 分鐘開始模擬';
+    const go = () => simulatePass(s.id, p.start);
+    row.el.addEventListener('click', go);
+    row.el.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+    list.append(row.el);
+  }
+}
+
+function simulatePass(id, startMs) {
+  setSim(Number(simSpeed.value), startMs - 60e3);
+  const ms = clockMs();
+  for (const s of sats.values()) updateSat(s, ms); // so select() frames the new position
+  if (selectedId !== id) select(id);
+}
+
+function setTab(name) {
+  passTab = name === 'passes';
+  $('tab-list').hidden = passTab;
+  $('tab-passes').hidden = !passTab;
+  document.querySelectorAll('[data-tab]').forEach((b) => {
+    const on = b.dataset.tab === name;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', String(on));
+  });
+  passKey = '';
+  renderPasses();
+}
+document.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.tab)));
+$('visible-only').addEventListener('change', () => { passKey = ''; renderPasses(); });
+
 function tickSlow() {
   const nowMs = clockMs();
   const sun = subsolarPoint(nowMs);
   geoToVec(sun.lat, sun.lng, 0, earthUniforms.sunDir.value).normalize();
+  sunLight.position.copy(earthUniforms.sunDir.value).multiplyScalar(50);
   $('clock').textContent = new Date(nowMs).toLocaleString('zh-TW', {
     timeZone: 'Asia/Taipei', hour12: false, year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit',
@@ -659,6 +887,7 @@ function tickSlow() {
   refreshList();
   updateHint();
   poll();
+  updatePasses();
 }
 
 function frame() {
@@ -707,7 +936,9 @@ async function start() {
   resize();
   homeSpace();
   savedSpacePos = camera.position.clone();
-  setView(new URLSearchParams(location.search).get('view') === 'sky' ? 'sky' : 'space');
+  const params = new URLSearchParams(location.search);
+  setView(params.get('view') === 'sky' ? 'sky' : 'space');
+  if (params.get('tab') === 'passes') setTab('passes');
 
   loadIds().forEach(createSat);
   renderCount();

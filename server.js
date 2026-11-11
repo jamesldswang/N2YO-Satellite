@@ -102,6 +102,26 @@ function getTle(id) {
   });
 }
 
+// N2YO's own pass predictions. The page computes passes itself with SGP4;
+// these exist so tools/check-passes.js can compare against N2YO. Both
+// endpoints are limited to 100 requests per hour, hence the long cache.
+const PASS_DAYS = 3;
+const PASS_ARG = { radio: 10, visual: 1 }; // min elevation (°) / min visible seconds
+function getPasses(kind, id) {
+  const { lat, lng, alt } = OBSERVER;
+  return cached(`${kind}passes:${id}`, 3600e3, async () => {
+    const fetchedAt = Date.now(); // N2YO predicts from this moment; the response may be served from cache later
+    const body = await n2yo(`${kind}passes/${id}/${lat}/${lng}/${alt}/${PASS_DAYS}/${PASS_ARG[kind]}/`);
+    return {
+      satid: body.info?.satid ?? Number(id),
+      satname: body.info?.satname || `#${id}`,
+      days: PASS_DAYS,
+      fetchedAt,
+      passes: body.passes || [],
+    };
+  });
+}
+
 function sendJson(res, status, data) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(data));
@@ -127,6 +147,15 @@ const server = http.createServer(async (req, res) => {
 
   if (pathname === '/api/config') {
     sendJson(res, 200, { observer: OBSERVER, hasKey: Boolean(apiKey()), version: VERSION });
+    return;
+  }
+  const passMatch = pathname.match(/^\/api\/passes\/(radio|visual)\/(\d{1,6})$/);
+  if (passMatch) {
+    try {
+      sendJson(res, 200, await getPasses(passMatch[1], passMatch[2]));
+    } catch (err) {
+      sendJson(res, err.status || 500, { error: err.status ? err.message : '伺服器錯誤' });
+    }
     return;
   }
   const match = pathname.match(/^\/api\/(positions|tle)\/(\d{1,6})$/);

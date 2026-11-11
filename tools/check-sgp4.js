@@ -48,7 +48,13 @@ async function json(url) {
         lat: geo.latitude / DEG, lng: geo.longitude / DEG,
       };
       const diff = (a, b, wrap) => { const d = Math.abs(a - b); return wrap ? Math.min(d, 360 - d) : d; };
-      const worst = Math.max(diff(mine.el, p.el), diff(mine.az, p.az, true), diff(mine.lat, p.lat), diff(mine.lng, p.lng, true));
+      // 方位角在仰角接近 ±90°（正上方或正下方）時很敏感，換算成實際的角距離要乘 cos(仰角)；經度同理乘 cos(緯度)。
+      const worst = Math.max(
+        diff(mine.el, p.el),
+        diff(mine.az, p.az, true) * Math.cos(p.el * DEG),
+        diff(mine.lat, p.lat),
+        diff(mine.lng, p.lng, true) * Math.cos(p.lat * DEG),
+      );
       const ok = worst <= LIMIT;
       if (!ok) failed++;
       console.log(`${ok ? 'OK  ' : 'FAIL'} ${id} ${pos.satname.padEnd(18)} 最大差 ${worst.toFixed(2)}°  `
