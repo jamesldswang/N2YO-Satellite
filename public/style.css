@@ -18,6 +18,10 @@ body {
   overflow: hidden;
 }
 button, input { font: inherit; color: inherit; }
+select {
+  font: inherit; color: inherit; background: var(--panel); color-scheme: dark;
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; cursor: pointer;
+}
 button {
   background: rgba(255, 255, 255, .06);
   border: 1px solid var(--line);
@@ -81,6 +85,20 @@ button:hover { background: rgba(255, 255, 255, .13); }
   border: 1px solid var(--line);
   border-radius: 10px;
 }
+#replay-toggle:disabled { opacity: 0.45; cursor: not-allowed; }
+body.replaying .sim, body.replaying #hint { display: none; }
+body.replaying #replay-toggle { background: var(--accent); color: #17130a; font-weight: 600; }
+#replay-bar {
+  position: fixed; left: 12px; right: calc(310px + 24px + 12px); bottom: 12px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+#replay-pos { flex: 1; min-width: 160px; accent-color: var(--accent); }
+#replay-time { color: var(--accent); font-variant-numeric: tabular-nums; font-size: 13px; }
+#replay-play { min-width: 5.5em; }
 [hidden] { display: none !important; }
 .tabs { margin-bottom: 10px; }
 .tabs button { flex: 1; }
@@ -158,5 +176,6 @@ button:hover { background: rgba(255, 255, 255, .13); }
 @media (max-width: 720px) {
   #panel { top: auto; left: 12px; right: 12px; width: auto; height: 36vh; }
   .bar { max-width: calc(100vw - 24px); } /* 面板移到下方了，工具列可以用滿寬度 */
+  #replay-bar { right: 12px; bottom: calc(36vh + 24px); }
   #hint { display: none; }
 }

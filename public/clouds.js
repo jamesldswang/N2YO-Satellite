@@ -6,13 +6,32 @@ import * as THREE from 'three';
 
 const REFRESH_MS = 10 * 60e3;   // 氣象署每 10 分鐘出一張
 const TEX_SIZE = 2750;          // 原圖 5500，縮一半（約 4 公里一格）省下 GPU 記憶體
+const HIST_TEX_SIZE = 2048;     // 回放用的歷史雲圖再小一點（約 5.5 公里一格），一次要留好幾張
+const MAX_CACHED = 4;           // 回放時最多留幾張歷史雲圖在 GPU（每張約 17 MB）
+
+async function makeTexture(blob, size) {
+  const bitmap = await createImageBitmap(blob, { resizeWidth: size, resizeHeight: size, resizeQuality: 'high' });
+  const tex = new THREE.Texture(bitmap);
+  tex.flipY = false;                   // ImageBitmap 不能翻轉；shader 的 v = 0 就是圖的最上面
+  tex.colorSpace = THREE.NoColorSpace; // 亮度是資料（溫度），不要做色彩轉換
+  tex.generateMipmaps = true;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+const disposeTex = (tex) => { tex.dispose(); tex.image?.close?.(); };
 
 export class CloudLayer {
   constructor(scene, sunDir) {
     this.enabled = false;
     this.status = '';
-    this.obsTime = null;        // Date
+    this.obsTime = null;        // Date：現在畫面上這張的觀測時間
     this.timer = null;
+    this.live = null;           // { tex, t }：最新的一張
+    this.cache = new Map();     // 歷史檔名 -> { tex, t, used }（回放用）
+    this.pending = new Set();   // 下載中的歷史檔名
+    this.failed = new Set();    // 下載失敗的（例如已經超過 24 小時被刪掉），不再重試
+    this.shown = null;          // 畫面上這張（live 或 cache 裡的某一張）
     this.uniforms = {
       cloudMap: { value: null },
       opacity: { value: 1 },    // 模擬時間離觀測時間太遠時調淡（app.js 設定）
@@ -73,7 +92,7 @@ export class CloudLayer {
   enable() {
     if (this.enabled) return;
     this.enabled = true;
-    this.mesh.visible = Boolean(this.uniforms.cloudMap.value);
+    this.mesh.visible = Boolean(this.shown);
     this.load();
     this.timer = setInterval(() => this.load(), REFRESH_MS);
   }
@@ -83,10 +102,12 @@ export class CloudLayer {
     this.mesh.visible = false;
     clearInterval(this.timer);
     this.timer = null;
+    for (const [file, e] of this.cache) if (e !== this.shown) { disposeTex(e.tex); this.cache.delete(file); }
   }
 
+  // 下載最新的一張
   async load() {
-    if (!this.uniforms.cloudMap.value) this.status = '雲圖下載中…';
+    if (!this.live) this.status = '雲圖下載中…';
     try {
       const res = await fetch('/api/clouds', { cache: 'no-store' });
       if (!res.ok) {
@@ -94,29 +115,65 @@ export class CloudLayer {
         try { msg = (await res.json()).error || msg; } catch { /* not JSON */ }
         throw new Error(msg);
       }
-      const obs = new Date(res.headers.get('X-Obs-Time'));
-      if (this.obsTime && obs.getTime() === this.obsTime.getTime() && this.uniforms.cloudMap.value) {
-        this.status = '';
-        return; // 還是同一張
-      }
-      const bitmap = await createImageBitmap(await res.blob(), {
-        resizeWidth: TEX_SIZE, resizeHeight: TEX_SIZE, resizeQuality: 'high',
-      });
-      const tex = new THREE.Texture(bitmap);
-      tex.flipY = false;                 // ImageBitmap 不能翻轉；shader 的 v = 0 就是圖的最上面
-      tex.colorSpace = THREE.NoColorSpace; // 亮度是資料（溫度），不要做色彩轉換
-      tex.generateMipmaps = true;
-      tex.minFilter = THREE.LinearMipmapLinearFilter;
-      tex.needsUpdate = true;
-      const old = this.uniforms.cloudMap.value;
-      this.uniforms.cloudMap.value = tex;
-      if (old) { old.dispose(); old.image?.close?.(); }
-      this.obsTime = obs;
+      const t = Date.parse(res.headers.get('X-Obs-Time'));
       this.status = '';
-      this.mesh.visible = this.enabled;
+      if (this.live && this.live.t === t) return; // 還是同一張
+      const old = this.live;
+      this.live = { tex: await makeTexture(await res.blob(), TEX_SIZE), t };
+      if (!this.shown || this.shown === old) this.display(this.live);
+      if (old) disposeTex(old.tex);
     } catch (err) {
-      this.status = this.uniforms.cloudMap.value ? '' : `雲圖載入失敗：${err.message}`;
+      this.status = this.live ? '' : `雲圖載入失敗：${err.message}`;
       console.warn('雲圖載入失敗', err);
+    }
+  }
+
+  // app.js 每 250 毫秒呼叫：ms = 模擬時鐘；frames = 歷史雲圖 [{ t, file }]（舊到新）；
+  // simulating = 正在加速模擬或回放。模擬到過去時，換成那時候的雲圖（t ≤ ms 的最後一張）。
+  showAt(ms, frames, simulating) {
+    if (!this.enabled) return;
+    let want = null; // null = 最新的一張
+    if (simulating && frames.length && (!this.live || ms < this.live.t)) {
+      let pick = frames[0]; // 比最早的還早就用最早的（app.js 會標成「不隨模擬變化」並調淡）
+      for (const f of frames) { if (f.t <= ms) pick = f; else break; }
+      if (!this.live || pick.t < this.live.t) want = pick;
+    }
+    if (!want) { if (this.live) this.display(this.live); return; }
+    const hit = this.cache.get(want.file);
+    if (hit) { hit.used = Date.now(); this.display(hit); } else this.fetchFrame(want);
+    const next = frames[frames.indexOf(want) + 1]; // 回放時先把下一張載好，換圖才不會卡
+    if (next && !this.cache.has(next.file)) this.fetchFrame(next);
+  }
+
+  display(entry) {
+    this.shown = entry;
+    this.uniforms.cloudMap.value = entry.tex;
+    this.obsTime = new Date(entry.t);
+    this.mesh.visible = this.enabled;
+  }
+
+  async fetchFrame(f) {
+    if (this.pending.has(f.file) || this.failed.has(f.file) || this.pending.size >= 2) return;
+    this.pending.add(f.file);
+    try {
+      const res = await fetch(`/api/clouds/history/${encodeURIComponent(f.file)}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const tex = await makeTexture(await res.blob(), HIST_TEX_SIZE);
+      if (!this.enabled) { disposeTex(tex); return; }
+      this.cache.set(f.file, { tex, t: f.t, used: Date.now() });
+      // 超過上限就丟掉最久沒用到的（畫面上那張除外）
+      while (this.cache.size > MAX_CACHED) {
+        let oldest = null;
+        for (const [file, e] of this.cache) if (e !== this.shown && (!oldest || e.used < oldest[1].used)) oldest = [file, e];
+        if (!oldest) break;
+        disposeTex(oldest[1].tex);
+        this.cache.delete(oldest[0]);
+      }
+    } catch (err) {
+      this.failed.add(f.file);
+      console.warn('歷史雲圖載入失敗', f.file, err);
+    } finally {
+      this.pending.delete(f.file);
     }
   }
 }

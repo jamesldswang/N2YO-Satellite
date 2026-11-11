@@ -853,6 +853,8 @@ function renderPasses() {
 }
 
 function simulatePass(id, startMs) {
+  replay = null; // 點過境預報就離開回放，改成一般的加速模擬
+  showReplayBar(false);
   setSim(Number(simSpeed.value), startMs - 60e3);
   const ms = clockMs();
   for (const s of sats.values()) updateSat(s, ms); // so select() frames the new position
@@ -890,6 +892,8 @@ function tickSlow() {
   updateHint();
   poll();
   updatePasses();
+  updateReplay();
+  applyHistory();
   renderStarlinkInfo();
   renderCloudInfo();
 }
@@ -899,7 +903,9 @@ const starlink = new StarlinkLayer(scene);
 const STARLINK_KEY = 'starlink-enabled';
 function setStarlink(on) {
   if (on) starlink.enable(); else starlink.disable();
+  starlinkWant = undefined; // 重新決定要用哪一份資料
   $('starlink-toggle').setAttribute('aria-pressed', String(on));
+  updateReplayButton();
   $('starlink-info').hidden = !on;
   try { localStorage.setItem(STARLINK_KEY, on ? '1' : '0'); } catch { /* optional */ }
   renderStarlinkInfo();
@@ -918,6 +924,7 @@ const CLOUDS_KEY = 'clouds-enabled';
 function setClouds(on) {
   if (on) clouds.enable(); else clouds.disable();
   $('clouds-toggle').setAttribute('aria-pressed', String(on));
+  updateReplayButton();
   $('clouds-info').hidden = !on;
   try { localStorage.setItem(CLOUDS_KEY, on ? '1' : '0'); } catch { /* optional */ }
   renderCloudInfo();
@@ -932,7 +939,9 @@ function renderCloudInfo() {
     const hm = clouds.obsTime.toLocaleTimeString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false, hour: '2-digit', minute: '2-digit' });
     stale = Math.abs(clockMs() - clouds.obsTime.getTime()) > CLOUDS_STALE_MS;
     if (stale) {
-      text = `雲圖為 ${hm} 的即時觀測，不隨模擬變化`;
+      text = `雲圖為 ${hm} 的觀測，不隨模擬變化`;
+    } else if (sim) {
+      text = `雲圖 ${hm}`;
     } else {
       const ago = Math.max(0, Math.round((Date.now() - clouds.obsTime.getTime()) / 60000));
       text = `觀測 ${hm}（${ago} 分鐘前）`;
@@ -944,10 +953,128 @@ function renderCloudInfo() {
 }
 $('clouds-toggle').addEventListener('click', () => setClouds(!clouds.enabled));
 
+// ---------- 回放 ----------
+// 用伺服器記錄的歷史資料（雲圖每 10 分鐘一張、保留 24 小時；星鏈 TLE 每 2.5 小時一份、保留 30 天），
+// 把時鐘撥回過去播放。只回放有開啟的圖層；追蹤清單的衛星用 SGP4 往回推算。
+let archive = { starlink: [], clouds: [] }; // [{ t, file }]，舊到新
+let historyAt = 0;
+async function loadHistory() {
+  try {
+    archive = await api('/api/history');
+    historyAt = Date.now();
+  } catch (err) {
+    console.warn('讀取歷史資料清單失敗', err);
+  }
+}
+
+// 模擬到過去時，星鏈改用那時候的 TLE（t ≤ 時鐘的最後一份）；即時或比最新備份還晚就用最新資料。
+let starlinkWant;
+function applyHistory() {
+  const ms = clockMs();
+  clouds.showAt(ms, archive.clouds, Boolean(sim));
+  if (!starlink.enabled || !starlink.worker) return;
+  const list = archive.starlink;
+  let want = null;
+  if (sim && list.length && ms < list[list.length - 1].t) {
+    want = list[0].file;
+    for (const h of list) { if (h.t <= ms) want = h.file; else break; }
+  }
+  if (want !== starlinkWant) { starlinkWant = want; starlink.useDataset(want); }
+}
+
+let replay = null; // { speed, playing }
+let replayDragging = false;
+const replayPos = $('replay-pos'), replayPlay = $('replay-play'), replaySpeed = $('replay-speed');
+
+function updateReplayButton() {
+  const any = clouds.enabled || starlink.enabled;
+  $('replay-toggle').disabled = !any;
+  $('replay-toggle').title = any ? '用伺服器記錄的歷史資料，回放有開啟的圖層（衛星雲圖、星鏈）' : '先開啟衛星雲圖或星鏈';
+}
+
+function fmtTaipei(ms) {
+  return new Date(ms).toLocaleString('zh-TW', {
+    timeZone: 'Asia/Taipei', hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  });
+}
+
+function showReplayBar(on) {
+  $('replay-bar').hidden = !on;
+  document.body.classList.toggle('replaying', on);
+}
+
+async function startReplay() {
+  await loadHistory();
+  const starts = [];
+  if (clouds.enabled && archive.clouds.length) starts.push(archive.clouds[0].t);
+  if (starlink.enabled && archive.starlink.length) starts.push(archive.starlink[0].t);
+  showReplayBar(true);
+  if (!starts.length) {
+    replay = null;
+    replayPos.disabled = replayPlay.disabled = true;
+    $('replay-time').textContent = '還沒有歷史資料。伺服器開著時會自動累積：雲圖每 10 分鐘一張，星鏈每 2.5 小時一份。';
+    return;
+  }
+  const start = Math.min(...starts);
+  replay = { speed: Number(replaySpeed.value), playing: true };
+  replayPos.disabled = replayPlay.disabled = false;
+  replayPos.min = String(start);
+  replayPos.max = String(Date.now());
+  replayPos.step = '60000';
+  setSim(replay.speed, start);
+  renderReplay();
+}
+
+function exitReplay() {
+  const was = Boolean(replay);
+  replay = null;
+  showReplayBar(false);
+  if (was) setSim(null);
+}
+
+function setReplayPlaying(on) {
+  if (!replay) return;
+  replay.playing = on;
+  setSim(on ? replay.speed : 0);
+  renderReplay();
+}
+
+function renderReplay() {
+  if (!replay) return;
+  const ms = clockMs();
+  if (!replayDragging) replayPos.value = String(ms);
+  replayPlay.textContent = replay.playing ? '⏸ 暫停' : '▶ 播放';
+  const text = `${fmtTaipei(ms)}（${Math.round((Date.now() - ms) / 3600e3 * 10) / 10} 小時前）`;
+  if ($('replay-time').textContent !== text) $('replay-time').textContent = text;
+}
+
+// tickSlow 每 250 毫秒呼叫
+function updateReplay() {
+  if (!replay) return;
+  replayPos.max = String(Date.now());
+  if (clockMs() >= Date.now()) { exitReplay(); return; } // 播到現在了，回到即時
+  if (Date.now() - historyAt > 5 * 60e3) loadHistory(); // 回放中也有新的雲圖進來
+  renderReplay();
+}
+
+$('replay-toggle').addEventListener('click', () => ($('replay-bar').hidden ? startReplay() : exitReplay()));
+$('replay-exit').addEventListener('click', exitReplay);
+replayPlay.addEventListener('click', () => setReplayPlaying(!replay?.playing));
+replaySpeed.addEventListener('change', () => {
+  if (!replay) return;
+  replay.speed = Number(replaySpeed.value);
+  if (replay.playing) setSim(replay.speed);
+});
+replayPos.addEventListener('pointerdown', () => { replayDragging = true; });
+window.addEventListener('pointerup', () => { replayDragging = false; });
+replayPos.addEventListener('input', () => {
+  if (replay) setSim(replay.playing ? replay.speed : 0, Number(replayPos.value));
+});
+
 function frame() {
   const ms = clockMs();
   for (const s of sats.values()) updateSat(s, ms);
-  starlink.update(ms, up, Boolean(sim) && sim.speed > 1);
+  starlink.update(ms, up, sim ? Math.max(1, sim.speed) : 1);
   if (view === 'space') controls.update(); else aimSky();
   updateLabels();
   renderer.render(scene, camera);
@@ -1000,6 +1127,7 @@ async function start() {
   let cloudsOn = params.get('clouds') === '1';
   try { cloudsOn ||= localStorage.getItem(CLOUDS_KEY) === '1'; } catch { /* optional */ }
   if (cloudsOn) setClouds(true);
+  updateReplayButton();
 
   loadIds().forEach(createSat);
   renderCount();

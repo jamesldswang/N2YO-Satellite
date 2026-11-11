@@ -59,6 +59,6 @@ self.onmessage = (e) => {
     self.postMessage({ type: 'loaded', count: recs.length });
   } else if (msg.type === 'tick') {
     const { pos, vel } = tick(msg.ms);
-    self.postMessage({ type: 'tick', ms: msg.ms, pos, vel }, [pos.buffer, vel.buffer]);
+    self.postMessage({ type: 'tick', ms: msg.ms, count: recs.length, pos, vel }, [pos.buffer, vel.buffer]);
   }
 };

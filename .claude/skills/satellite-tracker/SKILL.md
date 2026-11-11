@@ -11,7 +11,7 @@ description: 修改、測試「台灣上空衛星」網頁（D:\Personal_Git\sat
 
 | 檔案 | 內容 |
 |------|------|
-| `server.js` | 靜態伺服器 + `/api/starlink`（CelesTrak 星鏈 TLE，存在 `.cache/`）、`/api/config`、`/api/positions/:id`、`/api/tle/:id`、`/api/passes/radio|visual/:id`（N2YO 過境預報，只給測試工具用，快取 1 小時）。觀測點 `OBSERVER`、快取（`cached()`）、版號從 `package.json` 讀 |
+| `server.js` | 靜態伺服器 + `/api/starlink`（CelesTrak 星鏈 TLE）、`/api/clouds`、`/api/history`、`/api/starlink|clouds/history/<檔名>`（回放用）、`/api/config`、`/api/positions/:id`、`/api/tle/:id`、`/api/passes/radio|visual/:id`（N2YO 過境預報，只給測試工具用，快取 1 小時）。觀測點 `OBSERVER`、快取（`cached()`）、版號從 `package.json` 讀 |
 | `public/app.js` | **前端全部邏輯**：場景、地球 shader、觀測點座標系、衛星資料抓取、位置計算、清單、視角切換、加速模擬 |
 | `public/models.js` | 衛星 3D 模型（ES module）：`makeSatModel(kind)`、`modelKind(id, satrec)`、`setModelLit(g, lit)`、`disposeModel(g)`。模型座標 +X 側向、+Y 天頂、+Z 前進方向，建好後自動縮放到最長邊 = 1 |
 | `public/starlink.js` | 星鏈圖層 `StarlinkLayer`（ES module）：`enable()`、`disable()`、每幀 `update(ms, up, fast)`。Points 一個 draw call 畫上萬顆 |
@@ -79,9 +79,9 @@ description: 修改、測試「台灣上空衛星」網頁（D:\Personal_Git\sat
   - 肉眼可見 = 衛星被太陽照到（圓柱形地影模型）＋觀測點太陽仰角低於 −6°＋衛星仰角 ≥ 10°。N2YO 日落後 0–6° 也算可見，這是已知差異，不是 bug。
   - N2YO 的過境時間是 5 秒取樣，接近天頂的過境它的最高仰角會偏低 1–2°，比對時不要以為是我們錯。
 - **星鏈**：
-  - 資料來源是 CelesTrak `gp.php?GROUP=starlink&FORMAT=tle`（約 1 萬顆、1.8 MB），不是 N2YO。**CelesTrak 2 小時內重複下載會回 HTTP 200 加一段文字說明（不是 TLE）**，所以 `server.js` 用 `looksLikeTle()` 判斷，失敗就保留舊資料、30 分鐘後才再試；資料存在 `.cache/starlink.tle`（gitignore、不打包），重啟也不重抓，2.5 小時後才更新。**開發測試不要反覆打 CelesTrak**，會被擋（也可能被封 IP）。
-  - 每次成功下載由 `archiveStarlink()` 另存 `.cache/starlink-history/<UTC 時間>Z.tle.gz`，超過 `STARLINK_KEEP_DAYS`（預設 30）天的刪掉。`.cache/starlink.tle` 存在後，伺服器每 10 分鐘呼叫一次 `getStarlink()`，到期就在背景更新，所以網頁沒開也會累積備份。測試備份邏輯時把 `server.js` 複製到 scratchpad、mock `global.fetch`，不要碰專案的 `.cache/`。
-  - 要測畫面又不想打 CelesTrak：暫時在 `.cache/starlink.tle` 放自己產生的假星座 TLE（例如照 Walker 星座改 RAAN、平近點角），**測完一定要刪掉並重啟伺服器**（記憶體裡也有一份），不然會一直顯示假資料到 2.5 小時後。
+  - 資料來源是 CelesTrak `gp.php?GROUP=starlink&FORMAT=tle`（約 1 萬顆、1.8 MB），不是 N2YO。**CelesTrak 2 小時內重複下載會回 HTTP 200 加一段文字說明（不是 TLE）**，所以 `server.js` 用 `looksLikeTle()` 判斷，失敗就保留舊資料、30 分鐘後才再試；資料存在資料資料夾的 `starlink.tle`，重啟也不重抓，2.5 小時後才更新。**開發測試不要反覆打 CelesTrak**，會被擋（也可能被封 IP）。
+  - 每次成功下載由 `archiveStarlink()` 另存資料資料夾的 `starlink-history/<UTC 時間>Z.tle.gz`，超過 `STARLINK_KEEP_DAYS`（預設 30）天的刪掉。`starlink.tle` 存在後，伺服器每 10 分鐘呼叫一次 `getStarlink()`，到期就在背景更新，所以網頁沒開也會累積備份。測試備份邏輯時把 `server.js` 複製到 scratchpad、mock `global.fetch`，用 `DATA_DIR` 指到 scratchpad，不要碰使用者的資料資料夾。
+  - 要測畫面又不想打 CelesTrak：用 `DATA_DIR` 指到 scratchpad 的測試資料夾，在裡面的 `starlink.tle` 放自己產生的假星座 TLE（例如照 Walker 星座改 RAAN、平近點角），**測完把測試伺服器關掉、資料夾刪掉**。
   - Worker 每次算全部約 1 萬顆要 150–200 毫秒；即時模式每秒算一次，加速模擬每 0.4 秒一次，中間每幀用速度外插（10 秒誤差約 0.4 公里）。跳時間超過 5 分鐘先隱藏，等新結果。
   - 位置用 Bowring 公式轉成大地緯度和高度，和其他衛星的 `geoToVec` 一致（直接用地心座標會差 10–20 公里，從地面看約 2°）。
   - 「在台灣地平線上」用 `p·up > 1` 判斷（地球半徑 = 1）。
@@ -102,6 +102,13 @@ description: 修改、測試「台灣上空衛星」網頁（D:\Personal_Git\sat
   - 雲球只畫正面，所以在台灣仰望視角（相機在球裡面）看不到，不會擋住衛星。
   - 雲圖只有即時觀測：`renderCloudInfo()`（tickSlow 每 250 毫秒）比較 `clockMs()` 和 `clouds.obsTime`，差超過 `CLOUDS_STALE_MS`（1 小時）就把 `uniforms.opacity` 設 0.3、資訊改成黃字註明。
   - 開關存在 localStorage `clouds-enabled`，網址 `?clouds=1` 也能開。
+- **資料資料夾**（1.5.0 起）：`CACHE_DIR` = `.env` 的 `DATA_DIR`，預設 `%LOCALAPPDATA%\SatelliteTracker`。打包版每版是不同資料夾，放程式旁邊的話換版就丟歷史。啟動時 `migrateOldCache()` 把程式資料夾的舊 `.cache/` 複製過去（不覆蓋）。開發伺服器和打包版共用同一個資料夾。**測試一律設 `DATA_DIR` 到 scratchpad**，不要動使用者的資料。
+- **回放**：
+  - 伺服器：每張新雲圖由 `archiveClouds()` 存成 `clouds-history/<觀測時間 UTC>Z.jpg`，保留 `CLOUDS_KEEP_HOURS`（24）小時，依檔名時間刪。`clouds-history` 存在就每 5 分鐘在背景 `getClouds()`（新圖每 10 分鐘一張，5 分鐘才不會漏）。`/api/history` 回傳 `{ starlink: [{t, file}], clouds: [...] }`；歷史檔用 `/api/starlink/history/<檔名>`（gzip 原檔加 `Content-Encoding: gzip`）、`/api/clouds/history/<檔名>`，檔名一律用 `HISTORY_NAME` 檢查。
+  - 前端：`startReplay()` 從有開的圖層最早的歷史時間開始 `setSim(speed, start)`；暫停 = `setSim(0)`；`updateReplay()`（tickSlow）播到現在就 `exitReplay()`。回放中 `body.replaying` 會藏起加速模擬控制和提示。`simulatePass()` 會離開回放。
+  - `applyHistory()`（tickSlow）：`clouds.showAt(ms, archive.clouds, Boolean(sim))` 選 t ≤ ms 的最後一張（`CloudLayer` 最多快取 `MAX_CACHED` 張 2048 px，預先載入下一張）；星鏈選 t ≤ ms 的最後一份 TLE，比最新備份還晚就用最新資料，`StarlinkLayer.useDataset(file)` 換資料（Worker 重新 load，顆數不同會重建 Points）。
+  - 星鏈 `update(ms, up, speed)`：外插最多 ±90 秒；Worker 結果的時間差超過 `max(5 分鐘, speed × 1.5 秒)` 才隱藏，不然高倍速回放時光點一直消失。
+  - 測試回放：用 `DATA_DIR` 放幾張真的雲圖（檔名改成想要的時間）和星鏈備份，另開 port；用 DevTools Protocol 按 `#replay-toggle`、改 `#replay-pos` 的值並觸發 `input`，用 `performance.getEntriesByType('resource')` 看抓了哪些歷史檔。
 - **瀏覽器記住的清單**（localStorage `tracked-satellites`）會蓋過 `DEFAULT_IDS`。
 - 這台電腦是 Windows，git 會出現 LF → CRLF 的警告，不影響。
 

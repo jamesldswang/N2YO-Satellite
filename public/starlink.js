@@ -19,6 +19,30 @@ export class StarlinkLayer {
     this.busy = false;
     this.base = null;      // { ms, pos, vel }：最近一次 Worker 算出的結果
     this.lastRequest = 0;
+    this.dataset = null;   // null = 最新資料（/api/starlink）；字串 = 歷史備份檔名（回放用）
+    this.wanted = null;    // 想要切換到的資料
+    this.switching = false;
+  }
+
+  // 回放時改用那個時間點的 TLE 備份；null = 最新資料。切換在背景進行，換好之前繼續用舊的。
+  async useDataset(file) {
+    this.wanted = file;
+    if (!this.worker || this.switching || file === this.dataset) return;
+    this.switching = true;
+    try {
+      const res = await fetch(file ? `/api/starlink/history/${encodeURIComponent(file)}` : '/api/starlink');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      this.dataset = file;
+      this.base = null;
+      this.worker.postMessage({ type: 'load', text });
+    } catch (err) {
+      console.warn('星鏈歷史資料載入失敗', err);
+      this.wanted = this.dataset; // 不要一直重試
+    } finally {
+      this.switching = false;
+    }
+    if (this.wanted !== this.dataset) this.useDataset(this.wanted);
   }
 
   async enable() {
@@ -58,6 +82,14 @@ export class StarlinkLayer {
   onMessage(msg) {
     if (msg.type === 'loaded') {
       this.count = msg.count;
+      if (this.points) { // 換了一份資料（回放），顆數可能不同，重建
+        this.scene.remove(this.points);
+        this.points.geometry.dispose();
+        this.points.material.dispose();
+        this.points = null;
+      }
+      this.busy = false;
+      this.base = null;
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(msg.count * 3), 3));
       geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(msg.count * 3), 3));
@@ -69,13 +101,14 @@ export class StarlinkLayer {
       this.scene.add(this.points);
     } else if (msg.type === 'tick') {
       this.busy = false;
-      this.base = msg;
+      if (this.points && msg.count === this.count) this.base = msg; // 換資料前送出的舊結果不要用
     }
   }
 
-  // 每一幀呼叫。ms = 模擬時鐘；up = 觀測點（台灣）的單位向量；fast = 是否在加速模擬。
-  update(ms, up, fast) {
+  // 每一幀呼叫。ms = 模擬時鐘；up = 觀測點（台灣）的單位向量；speed = 模擬倍速（即時 = 1）。
+  update(ms, up, speed = 1) {
     if (!this.enabled || !this.points) return;
+    const fast = speed > 1;
     // 定期請 Worker 重算：即時每秒一次；加速模擬時更頻繁，外插的時間才不會太長。
     const interval = fast ? 400 : 1000;
     const base = this.base;
@@ -86,9 +119,13 @@ export class StarlinkLayer {
       this.worker.postMessage({ type: 'tick', ms });
     }
     // 跳時間（例如點過境預報）之後，舊結果外插太遠會不準，先藏起來等新結果。
-    if (!base || Math.abs(ms - base.ms) > 5 * 60e3) { this.points.visible = false; return; }
+    // 高倍速回放時 Worker 算一次（約 0.2 秒）模擬時間就過了好幾分鐘，門檻跟著倍速放寬。
+    const hideAfter = Math.max(5 * 60e3, speed * 1500);
+    if (!base || Math.abs(ms - base.ms) > hideAfter) { this.points.visible = false; return; }
 
-    const dt = ms - base.ms;
+    // 直線外插只在短時間內準（低軌衛星 90 秒約偏 30 公里，畫面上看不出來；再久就明顯飄出軌道），
+    // 超過 90 秒就停在那裡等下一批結果。高倍速回放時光點會一跳一跳的。
+    const dt = Math.max(-90e3, Math.min(90e3, ms - base.ms));
     const pos = this.points.geometry.attributes.position;
     const col = this.points.geometry.attributes.color;
     const p = pos.array, c = col.array, bp = base.pos, bv = base.vel;

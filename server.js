@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const util = require('util');
 const zlib = require('zlib');
+const os = require('os');
 
 const ENV_FILE = path.join(__dirname, '.env');
 try { process.loadEnvFile(ENV_FILE); } catch { /* .env is optional */ }
@@ -129,7 +130,23 @@ function getPasses(kind, id) {
 // then (HTTP 200 with a plain-text notice), so the file is kept on disk and
 // survives restarts; a refused or failed download keeps the old copy.
 const STARLINK_URL = 'https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=tle';
-const CACHE_DIR = path.join(__dirname, '.cache');
+// 資料（星鏈 TLE、歷史備份、雲圖歷史）放在固定位置，不放在程式資料夾裡：
+// 打包版每一版是不同資料夾，放在程式旁邊的話，換新版累積的歷史就不見了。
+// DATA_DIR 可以在 .env 改（測試時也用它隔開，不碰使用者的資料）。
+const CACHE_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), '.local', 'share'), 'SatelliteTracker');
+// 1.3.x 以前放在程式資料夾的 .cache/：第一次啟動時搬過來（複製，不覆蓋已有的檔案）
+(function migrateOldCache() {
+  const old = path.join(__dirname, '.cache');
+  try {
+    if (path.resolve(old) === CACHE_DIR || !fs.existsSync(old)) return;
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    fs.cpSync(old, CACHE_DIR, { recursive: true, force: false, errorOnExist: false });
+  } catch (err) {
+    console.log(`搬移舊的 .cache 失敗：${err.message}`);
+  }
+})();
 const STARLINK_FILE = path.join(CACHE_DIR, 'starlink.tle');
 const STARLINK_TTL = 2.5 * 3600e3;
 const STARLINK_RETRY = 30 * 60e3;
@@ -147,8 +164,7 @@ const STARLINK_KEEP_DAYS = Number(process.env.STARLINK_KEEP_DAYS) || 30;
 function archiveStarlink(text, fetchedAt) {
   try {
     fs.mkdirSync(HISTORY_DIR, { recursive: true });
-    const stamp = new Date(fetchedAt).toISOString().slice(0, 16).replace(':', '-');
-    fs.writeFileSync(path.join(HISTORY_DIR, `${stamp}Z.tle.gz`), zlib.gzipSync(text));
+    fs.writeFileSync(path.join(HISTORY_DIR, `${stampOf(fetchedAt)}Z.tle.gz`), zlib.gzipSync(text));
     const cutoff = Date.now() - STARLINK_KEEP_DAYS * 86400e3;
     for (const name of fs.readdirSync(HISTORY_DIR)) {
       const file = path.join(HISTORY_DIR, name);
@@ -216,7 +232,10 @@ setInterval(() => {
 // arrives every 10 minutes; a failed check keeps the previous image.
 const CLOUDS_META = 'https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Observation/O-B0033-001.json';
 const CLOUDS_HOST = 'https://cwaopendata.s3.ap-northeast-1.amazonaws.com/';
-const CLOUDS_CHECK = 10 * 60e3;
+const CLOUDS_CHECK = 5 * 60e3; // 新圖每 10 分鐘一張；5 分鐘看一次才不會因為上架時間飄移而漏掉
+// 每張新雲圖另存一份到 clouds-history/（檔名是觀測時間，UTC），給回放用；每張約 3.4 MB，保留 CLOUDS_KEEP_HOURS 小時
+const CLOUDS_HISTORY_DIR = path.join(CACHE_DIR, 'clouds-history');
+const CLOUDS_KEEP_HOURS = Number(process.env.CLOUDS_KEEP_HOURS) || 24;
 let clouds = null;             // { image: Buffer, obsTime: ISO string, checkedAt }
 let cloudsError = null;
 let cloudsLoading = null;
@@ -243,6 +262,7 @@ async function refreshClouds() {
       const image = Buffer.from(await res.arrayBuffer());
       if (!res.ok || image[0] !== 0xff || image[1] !== 0xd8) throw new Error(`氣象署雲圖下載失敗（HTTP ${res.status}）`);
       clouds = { image, obsTime, checkedAt: Date.now() };
+      archiveClouds(image, obsTime);
     } else {
       clouds.checkedAt = Date.now();
     }
@@ -252,6 +272,45 @@ async function refreshClouds() {
     if (clouds) clouds.checkedAt = Date.now(); // keep the old image; try again next period
   }
 }
+
+// 歷史檔名：UTC 時間到分鐘，例如 2026-11-11T22-20Z.jpg、2026-11-11T21-39Z.tle.gz
+const stampOf = (ms) => new Date(ms).toISOString().slice(0, 16).replace(':', '-');
+const HISTORY_NAME = /^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})Z\.(?:jpg|tle\.gz)$/;
+const timeOfName = (name) => {
+  const m = name.match(HISTORY_NAME);
+  return m ? Date.parse(`${m[1]}T${m[2]}:${m[3]}:00Z`) : NaN;
+};
+
+function archiveClouds(image, obsTime) {
+  try {
+    fs.mkdirSync(CLOUDS_HISTORY_DIR, { recursive: true });
+    const file = path.join(CLOUDS_HISTORY_DIR, `${stampOf(Date.parse(obsTime))}Z.jpg`);
+    if (!fs.existsSync(file)) fs.writeFileSync(file, image);
+    const cutoff = Date.now() - CLOUDS_KEEP_HOURS * 3600e3;
+    for (const name of fs.readdirSync(CLOUDS_HISTORY_DIR)) {
+      if (name.endsWith('.jpg') && timeOfName(name) < cutoff) fs.unlinkSync(path.join(CLOUDS_HISTORY_DIR, name));
+    }
+  } catch (err) {
+    console.log(`雲圖歷史備份失敗：${err.message}`);
+  }
+}
+
+// 回放用：列出有哪些歷史資料（時間由舊到新）
+function listHistory(dir, ext) {
+  try {
+    return fs.readdirSync(dir)
+      .filter((name) => name.endsWith(ext) && Number.isFinite(timeOfName(name)))
+      .map((name) => ({ t: timeOfName(name), file: name }))
+      .sort((a, b) => a.t - b.t);
+  } catch {
+    return [];
+  }
+}
+
+// 開過一次雲圖之後（有歷史資料夾），伺服器開著就在背景持續存，網頁關掉也一樣
+setInterval(() => {
+  if (clouds || fs.existsSync(CLOUDS_HISTORY_DIR)) getClouds().catch(() => {});
+}, CLOUDS_CHECK);
 
 async function getClouds() {
   if (!clouds || Date.now() - clouds.checkedAt > CLOUDS_CHECK) {
@@ -309,6 +368,27 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       sendJson(res, err.status || 500, { error: err.status ? err.message : '伺服器錯誤' });
     }
+    return;
+  }
+  if (pathname === '/api/history') {
+    sendJson(res, 200, {
+      starlink: listHistory(HISTORY_DIR, '.tle.gz'),
+      clouds: listHistory(CLOUDS_HISTORY_DIR, '.jpg'),
+    });
+    return;
+  }
+  const histMatch = pathname.match(/^\/api\/(starlink|clouds)\/history\/([^/]+)$/);
+  if (histMatch) {
+    const [, kind, name] = histMatch;
+    const ok = HISTORY_NAME.test(name) && name.endsWith(kind === 'starlink' ? '.tle.gz' : '.jpg');
+    if (!ok) { sendJson(res, 400, { error: '檔名不對' }); return; }
+    fs.readFile(path.join(kind === 'starlink' ? HISTORY_DIR : CLOUDS_HISTORY_DIR, name), (err, data) => {
+      if (err) { sendJson(res, 404, { error: '找不到這份歷史資料' }); return; }
+      res.writeHead(200, kind === 'starlink'
+        ? { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Encoding': 'gzip', 'Cache-Control': 'max-age=86400' }
+        : { 'Content-Type': 'image/jpeg', 'Cache-Control': 'max-age=86400', 'X-Obs-Time': new Date(timeOfName(name)).toISOString() });
+      res.end(data);
+    });
     return;
   }
   const passMatch = pathname.match(/^\/api\/passes\/(radio|visual)\/(\d{1,6})$/);

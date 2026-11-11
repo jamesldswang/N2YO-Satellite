@@ -35,6 +35,7 @@
       <button id="clouds-toggle" type="button" aria-pressed="false" title="顯示中央氣象署的向日葵衛星紅外線雲圖（每 10 分鐘更新）">衛星雲圖</button>
       <span id="clouds-info" hidden></span>
     </div>
+    <button id="replay-toggle" type="button" disabled>回放</button>
     <div class="sim">
       <button id="sim-toggle" type="button" aria-pressed="false">加速模擬</button>
       <input id="sim-speed" type="range" min="1" max="200" step="1" value="10" aria-label="模擬倍速" hidden>
@@ -65,6 +66,19 @@
       <p class="note">未來 3 天、最高仰角 10° 以上，台灣時間。點一下會從過境前 1 分鐘開始模擬。</p>
     </section>
   </aside>
+
+  <div id="replay-bar" hidden>
+    <button id="replay-play" type="button">⏸ 暫停</button>
+    <input id="replay-pos" type="range" aria-label="回放時間">
+    <output id="replay-time" for="replay-pos"></output>
+    <select id="replay-speed" aria-label="回放倍速">
+      <option value="60">60×</option>
+      <option value="300">300×</option>
+      <option value="600" selected>600×</option>
+      <option value="1800">1800×</option>
+    </select>
+    <button id="replay-exit" type="button">結束回放</button>
+  </div>
 
   <p id="hint"></p>
   <div id="notice" hidden></div>
