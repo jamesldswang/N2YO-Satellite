@@ -1,0 +1,14 @@
+{
+  "name": "satellite-tracker",
+  "version": "1.1.0",
+  "description": "台灣上空衛星：Three.js 地球與 N2YO 即時衛星位置",
+  "private": true,
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "check": "node tools/check-sgp4.js",
+    "dist": "node build.js"
+  }
+}

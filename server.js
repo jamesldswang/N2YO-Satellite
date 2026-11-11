@@ -5,13 +5,28 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const util = require('util');
 
-try { process.loadEnvFile(path.join(__dirname, '.env')); } catch { /* .env is optional */ }
+const ENV_FILE = path.join(__dirname, '.env');
+try { process.loadEnvFile(ENV_FILE); } catch { /* .env is optional */ }
 
-const API_KEY = (process.env.N2YO_API_KEY || '').trim();
+// Re-read .env while no key is set, so a key typed in after start-up works
+// on the next page refresh without restarting the server. parseEnv rather
+// than loadEnvFile: the latter never overwrites a variable that is already
+// set, and the .env.example template sets the key to an empty string.
+function apiKey() {
+  if (!process.env.N2YO_API_KEY) {
+    try {
+      const key = util.parseEnv(fs.readFileSync(ENV_FILE, 'utf8')).N2YO_API_KEY;
+      if (key) process.env.N2YO_API_KEY = key;
+    } catch { /* still missing */ }
+  }
+  return (process.env.N2YO_API_KEY || '').trim();
+}
 const BASE = process.env.N2YO_BASE || 'https://api.n2yo.com/rest/v1/satellite';
 const PORT = Number(process.env.PORT) || 8000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const VERSION = require('./package.json').version;
 
 // Geographic centre of Taiwan; az/el from N2YO are relative to this point.
 const OBSERVER = { name: '台灣', lat: 23.6978, lng: 120.9605, alt: 0 };
@@ -39,10 +54,11 @@ function cached(key, ttl, load) {
 }
 
 async function n2yo(route) {
-  if (!API_KEY) throw new ApiError(401, '尚未設定 N2YO API Key');
+  const key = apiKey();
+  if (!key) throw new ApiError(401, '尚未設定 N2YO API Key');
   let res;
   try {
-    res = await fetch(`${BASE}/${route}&apiKey=${encodeURIComponent(API_KEY)}`, {
+    res = await fetch(`${BASE}/${route}&apiKey=${encodeURIComponent(key)}`, {
       signal: AbortSignal.timeout(15000),
     });
   } catch {
@@ -110,7 +126,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method !== 'GET') { res.writeHead(405).end(); return; }
 
   if (pathname === '/api/config') {
-    sendJson(res, 200, { observer: OBSERVER, hasKey: Boolean(API_KEY) });
+    sendJson(res, 200, { observer: OBSERVER, hasKey: Boolean(apiKey()), version: VERSION });
     return;
   }
   const match = pathname.match(/^\/api\/(positions|tle)\/(\d{1,6})$/);
@@ -127,6 +143,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`衛星追蹤：http://localhost:${PORT}`);
-  if (!API_KEY) console.log('尚未設定 N2YO_API_KEY，請見 README.md');
+  console.log(`台灣上空衛星 ${VERSION}：http://localhost:${PORT}`);
+  if (!apiKey()) console.log('尚未設定 N2YO_API_KEY，請見 README.md');
 });

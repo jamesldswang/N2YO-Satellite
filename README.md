@@ -1,23 +1,124 @@
-# 台灣上空衛星
+# 🛰️ 台灣上空衛星
 
-以 Three.js 顯示地球與衛星的即時位置，地球固定、視角以台灣為中心。資料來自 [N2YO REST API](https://www.n2yo.com/api/)。
+**版本：1.1.0**
 
-## 執行
+用 Three.js 顯示地球和衛星的即時位置。地球固定不轉，視角以台灣為中心，可以看出哪些衛星現在在台灣的地平線上、仰角和方位多少。資料來自 [N2YO REST API](https://www.n2yo.com/api/)。
 
-需要 Node.js 20.12 以上，沒有其他套件要安裝。
+---
 
-1. 到 n2yo.com 註冊，在個人資料頁產生 API Key。
-2. 把 `.env.example` 複製成 `.env`，填入金鑰：
+## 功能
+
+| 功能 | 說明 |
+|------|------|
+| 太空俯瞰 | 從太空看地球，衛星以彩色圓點顯示，旁邊有名稱。在台灣地平線上的衛星會用彩色直線連到台灣。日夜分界依照真實太陽位置 |
+| 台灣仰望 | 站在台灣往天空看。黃色圓是地平線，淺色圓是仰角 30°、60°，四周標出東南西北 |
+| 追蹤清單 | 依仰角由高到低排列，顯示高度、方位角；仰角大於 0（看得到）的以綠色標示。點一下會標出這顆衛星的軌道並對準它，再點一次取消 |
+| 增減衛星 | 在下方輸入 NORAD 編號按「加入」，按 ✕ 移除，最多 20 顆。清單會記在瀏覽器裡 |
+| 軌道線 | 用 TLE 以 SGP4 推算，畫出過去一小段和接下來一整圈 |
+| 加速模擬 | 從現在時刻開始快轉，預設 10 倍，滑桿可調 1–200 倍；按「回到即時」回到現在 |
+| 額度顯示 | 右下角顯示最近 60 分鐘用了幾次 N2YO 位置查詢 |
+
+### 操作
+
+- **太空俯瞰**：拖曳旋轉，滾輪縮放。
+- **台灣仰望**：拖曳轉動視線，滾輪調整視野大小。
+- **重置視角**：回到預設的位置和方向。
+- 網址加上 `?view=sky` 會直接用台灣仰望視角打開。
+
+### 加速模擬
+
+- 按上方 **加速模擬**，時鐘變成黃色，從現在時刻開始快轉。
+- 模擬中拖曳滑桿改倍速，時間會從目前的模擬時刻接著走，不會跳回現在。
+- 衛星位置、仰角、方位角都由瀏覽器用 SGP4 從 TLE 推算，和 N2YO 的結果相差約 0.1° 以內，**不會多用 N2YO 的查詢額度**。
+- 日夜分界和軌道線也會跟著模擬時間移動。
+- 參考：國際太空站繞地球一圈約 92 分鐘，100 倍時約 55 秒、200 倍時約 28 秒。
+
+---
+
+## 安裝與執行
+
+先到 [n2yo.com](https://www.n2yo.com/) 註冊，在個人資料頁產生 API Key，兩種方式都需要。
+
+### 方式一：使用打包好的版本（推薦）
+
+1. 到 [GitHub Releases](https://github.com/jamesldswang/N2YO-Satellite/releases/latest) 下載 `SatelliteTracker-1.1.0-win-x64.zip`，按右鍵選「解壓縮全部」，放到固定的位置。
+2. 打開資料夾，雙擊 **`start.cmd`**。
+3. 第一次執行會用記事本打開 `.env`，把金鑰填在 `N2YO_API_KEY=` 後面，存檔。
+4. 瀏覽器會自動打開 <http://localhost:8000>；填好金鑰後重新整理頁面即可，不用重新啟動。
+5. 要結束時，關掉 `start.cmd` 的黑色視窗。
+
+> 系統需求：Windows 10／11 64 位元，需要網路。已內含 Node.js（原版、有數位簽章的 `node.exe`），不用另外安裝。
+>
+> 資料夾裡的檔案都要一起保留。
+>
+> 如果 Windows 跳出「Windows 已保護您的電腦」，點「其他資訊」再點「仍要執行」。
+
+### 方式二：從原始碼執行
+
+需要 [Node.js](https://nodejs.org/) 20.12 以上，沒有其他套件要安裝。
+
+1. 把 `.env.example` 複製成 `.env`，填入金鑰：
 
    ```
    N2YO_API_KEY=你的金鑰
    ```
 
    `.env` 已列在 `.gitignore`，不會被 commit。
+2. 啟動伺服器，再打開 <http://localhost:8000>：
 
-3. 執行 `node server.js`，開啟 <http://localhost:8000>。
+   ```bash
+   npm start          # 或 node server.js
+   ```
 
-頁面的 Three.js、satellite.js 和地球貼圖由 CDN 載入，需要網路連線。
+也可以雙擊 `start.cmd`（有視窗，關掉就停止），或 `start.vbs`（背景執行，不跳出視窗，並自動打開瀏覽器）。兩個都會優先用資料夾裡的 `node.exe`，沒有的話用系統安裝的 Node.js；沒有 `.env` 時會自動從範本建立並用記事本打開。
+
+> 用 `start.vbs` 啟動的伺服器沒有視窗，關掉瀏覽器它還是在跑。要結束的話，在 PowerShell 執行：
+>
+> ```powershell
+> Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object CommandLine -like '*server.js*' | ForEach-Object { Stop-Process -Id $_.ProcessId }
+> ```
+
+---
+
+## 打包
+
+```bash
+npm run dist
+```
+
+會產生：
+
+- `dist\SatelliteTracker-<版號>-win-x64\`：可以直接執行的資料夾
+- `dist\SatelliteTracker-<版號>-win-x64.zip`：同一個資料夾的壓縮檔（約 33 MB）
+
+內容是 `server.js`、`public/`、`start.cmd`、`start.vbs`、`.env.example`、`README.md`，加上打包這台電腦上的 `node.exe` 和它的授權條款 `node-LICENSE.txt`。**`.env`（金鑰）不會被打包進去。**
+
+### 發布到 GitHub Release
+
+先在 README 的「版本紀錄」加上新版本的段落，並把 `package.json` 的版號改好，commit 並 push 之後，執行 `npm run dist` 再執行：
+
+```bash
+bash tools/release.sh
+```
+
+會建立 `v<版號>` 的 Release，說明文字取自 README 版本紀錄裡該版本的段落，並上傳 zip。GitHub 登入資料沿用 git 已存的帳密。
+
+> **為什麼不打包成單一個 .exe？** 做成單一 .exe 需要把程式寫進 `node.exe` 裡，原本的數位簽章就會失效，Windows 11 的「智慧型應用程式控制」會擋下沒有簽章的程式。所以直接附上原版 `node.exe`（內容不改、簽章有效），由 `start.cmd` 啟動。
+
+---
+
+## 測試
+
+先啟動伺服器，再執行：
+
+```bash
+npm run check                 # 預設 6 顆
+npm run check -- 25544 42920  # 指定衛星
+```
+
+會比對「加速模擬」用的 SGP4 推算和 N2YO 回傳的位置，每顆印出 `OK` 或 `FAIL` 和最大誤差。誤差超過 0.5° 就算失敗。
+
+---
 
 ## 預設衛星
 
@@ -30,25 +131,94 @@
 | 43013 | NOAA 20 |
 | 41836 | 向日葵 9 號 |
 
-可以在頁面上以 NORAD ID 增減衛星，清單會存在瀏覽器裡。
+NORAD 編號可以在 [n2yo.com](https://www.n2yo.com/) 或 [CelesTrak](https://celestrak.org/) 查。
 
-## 檔案結構
-
-| 檔案 | 說明 |
-| --- | --- |
-| `server.js` | 靜態檔案伺服器，並代理 N2YO API（N2YO 不支援 CORS，也讓金鑰不出現在前端） |
-| `public/index.html` | 頁面 |
-| `public/app.js` | Three.js 場景、衛星位置內插、SGP4 軌道線 |
-| `public/style.css` | 樣式 |
-| `.env.example` | 環境變數範本 |
+---
 
 ## 資料來源與額度
 
 | 用途 | N2YO 端點 | 更新頻率 | 每小時上限 |
 | --- | --- | --- | --- |
 | 衛星即時位置、對台灣的方位角與仰角 | `positions`（一次取 300 秒） | 每顆約每 3.5 分鐘 | 1000 |
-| 軌道線（由 satellite.js 以 SGP4 推算） | `tle` | 每顆每 6 小時 | 1000 |
+| 軌道線、加速模擬（由 satellite.js 以 SGP4 推算） | `tle` | 每顆每 6 小時 | 1000 |
 
-清單上限 20 顆，全開時約使用每小時 340 次 `positions`。
+清單上限 20 顆，全開時約使用每小時 340 次 `positions`。加速模擬期間不會查詢 `positions`。伺服器有快取，同時開好幾個分頁也不會多用額度。
 
-觀測點定義在 `server.js` 的 `OBSERVER`（預設為台灣地理中心），改成你的所在位置後，方位角與仰角就會以該點計算。
+---
+
+## 自訂
+
+| 想改的東西 | 檔案 | 位置 |
+|-----------|------|------|
+| 觀測點（預設台灣地理中心） | `server.js` | `OBSERVER`，改完方位角與仰角就以該點計算 |
+| 預設衛星 | `public/app.js` | `DEFAULT_IDS` |
+| 清單上限 | `public/app.js` | `MAX_SATS`（注意每小時額度） |
+| 模擬倍速範圍、預設倍速 | `public/index.html` | `<input id="sim-speed">` 的 `min`、`max`、`value`（`<output id="sim-rate">` 的文字也要跟著改） |
+| 連接埠 | `.env` | `PORT=8000` |
+| 版本號 | `package.json` | `"version"`，頁面標題旁會自動顯示 |
+
+改 `public/` 裡的檔案只要重新整理頁面；改 `server.js`、`package.json` 或已經設好的金鑰要重新啟動伺服器（第一次填入金鑰不用）。
+
+> 瀏覽器記住的衛星清單會蓋過 `DEFAULT_IDS`。改了預設值想看效果，要先把清單裡的衛星都移除，或清掉這個網站的瀏覽器資料。
+
+---
+
+## 專案結構
+
+```
+satellite-tracker/
+├── server.js          # 靜態檔案伺服器 + N2YO API 代理（含快取）。N2YO 不支援 CORS，也讓金鑰不出現在前端
+├── public/
+│   ├── index.html     # 頁面
+│   ├── app.js         # Three.js 場景、衛星位置內插、SGP4 軌道線與加速模擬
+│   └── style.css      # 樣式
+├── tools/
+│   ├── check-sgp4.js  # 測試工具：比對 SGP4 推算和 N2YO 的位置
+│   ├── release.sh     # 發布 GitHub Release 並上傳 zip
+│   └── release-body.js  # 產生 Release 說明文字（release.sh 會呼叫）
+├── build.js           # 打包腳本（npm run dist）
+├── start.cmd          # 啟動檔：有視窗，關掉就停止
+├── start.vbs          # 啟動檔：背景執行，不跳出視窗
+├── .claude/skills/satellite-tracker/SKILL.md  # 給 Claude Code 的專案說明
+├── .env.example       # 環境變數範本（複製成 .env）
+├── .gitattributes     # .cmd、.vbs 固定用 CRLF 換行
+├── package.json       # 版本號、npm start / check / dist
+└── README.md
+```
+
+---
+
+## 已知限制
+
+- **需要網路**：Three.js、satellite.js 和地球貼圖都從 CDN 載入，衛星資料也要連 N2YO。
+- **只有這台電腦看得到**：伺服器只聽 `127.0.0.1`，手機或其他電腦連不到。
+- **模擬越久越不準**：SGP4 用的 TLE 是某個時間點的軌道參數，離那個時間越遠誤差越大。低軌衛星模擬到幾天後，位置可能差幾十到上百公里；看「什麼時候大概會經過」可以，精確的過境時間要以 N2YO 或其他預報為準。
+- **N2YO 每小時 1000 次**：超過的話要等一小時。金鑰錯誤或衛星編號錯誤時，伺服器會暫停查詢 30 秒，避免一直浪費額度。
+- **仰望視角的星空沒有畫**：太空俯瞰的背景星星只是裝飾，所以在台灣仰望視角會隱藏，不是真實的星空。
+- **已墜落或編號錯誤的衛星**：清單上會顯示錯誤訊息，按 ✕ 移除即可。
+
+---
+
+## 版本紀錄
+
+### 1.1.0（2026-11-11）
+
+- 新增加速模擬：預設 10 倍，滑桿可調 1–200 倍，「回到即時」回到現在
+- 模擬時改用瀏覽器端 SGP4 推算位置、仰角、方位角，不多用 N2YO 額度；日夜分界、軌道線跟著模擬時間移動
+- 頁面標題旁顯示版號
+- 提供可攜式打包版（zip，內含原版 Node.js），解壓後雙擊 `start.cmd` 就能執行，不用安裝 Node.js
+- 新增啟動檔 `start.cmd`（有視窗，關掉就停止）、`start.vbs`（背景執行）；第一次執行會從範本建立 `.env` 並用記事本打開
+- 第一次填入 API Key 後重新整理頁面即可，不用重新啟動伺服器
+- 新增 `package.json`（`npm start`、`npm run check`、`npm run dist`）、打包腳本 `build.js`、發布腳本 `tools/release.sh`
+- 新增測試工具 `tools/check-sgp4.js`
+- README 改寫，補上功能、操作、自訂、已知限制、版本紀錄
+
+### 1.0.0（2026-11-11）
+
+- 第一個版本
+- Three.js 地球（真實日夜分界、城市燈光、大氣光暈），地球固定、以台灣為中心
+- 透過本機伺服器代理 N2YO API，取得衛星即時位置和對台灣的方位角、仰角
+- 太空俯瞰、台灣仰望兩種視角
+- 追蹤清單依仰角排序，可以用 NORAD 編號增減衛星（最多 20 顆）
+- 以 TLE 推算並畫出軌道線
+- 預設 6 顆：國際太空站、天和號、哈伯、福衛五號、NOAA 20、向日葵 9 號

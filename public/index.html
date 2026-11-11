@@ -20,13 +20,18 @@
   <div id="labels" aria-hidden="true"></div>
 
   <header class="bar">
-    <h1>台灣上空衛星</h1>
+    <h1>台灣上空衛星 <span id="version"></span></h1>
     <time id="clock"></time>
     <div class="segmented" role="group" aria-label="視角">
       <button data-view="space" type="button">太空俯瞰</button>
       <button data-view="sky" type="button">台灣仰望</button>
     </div>
     <button id="reset" type="button">重置視角</button>
+    <div class="sim">
+      <button id="sim-toggle" type="button" aria-pressed="false">加速模擬</button>
+      <input id="sim-speed" type="range" min="1" max="200" step="1" value="10" aria-label="模擬倍速" hidden>
+      <output id="sim-rate" for="sim-speed" hidden>10×</output>
+    </div>
   </header>
 
   <aside id="panel">

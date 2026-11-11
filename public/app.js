@@ -32,6 +32,14 @@ function subsolarPoint(ms) {
   return { lat: dec, lng: ra - gmst };
 }
 
+// Simulation clock. null = live: real time, positions from N2YO samples.
+// While simulating, positions come from SGP4 on the TLE instead, so running
+// at up to 200× costs no extra API requests.
+let sim = null;
+function clockMs() {
+  return sim ? sim.fromSim + (Date.now() - sim.fromReal) * sim.speed : Date.now();
+}
+
 const $ = (id) => document.getElementById(id);
 const canvas = $('scene');
 const labelsEl = $('labels');
@@ -112,6 +120,7 @@ const stars = (() => {
 scene.add(stars);
 
 let observer = { name: '台灣', lat: 23.6978, lng: 120.9605 };
+let observerGd = null; // satellite.js form of observer (radians, km)
 const up = new THREE.Vector3(), east = new THREE.Vector3(), north = new THREE.Vector3();
 const taiwanGroup = new THREE.Group();
 const skyGrid = new THREE.Group();
@@ -217,7 +226,7 @@ function createSat(id) {
   const s = {
     id, colorIndex, color, sprite, path, link, label,
     name: `#${id}`, samples: [], satrec: null, state: null, error: null,
-    busy: false, nextFetch: 0, nextTle: 0, nextPath: 0, row: null,
+    busy: false, nextFetch: 0, nextTle: 0, pathAt: -Infinity, row: null,
     pos: new THREE.Vector3(),
   };
   s.row = makeRow(s);
@@ -281,7 +290,7 @@ async function loadTle(s, now) {
     if (!sats.has(s.id)) return;
     s.satrec = sgp4.twoline2satrec(line1, line2);
     s.nextTle = now + 6 * 3600;
-    s.nextPath = 0;
+    s.pathAt = -Infinity;
   } catch { /* the orbit line is optional; the live position still works */ }
 }
 
@@ -289,7 +298,7 @@ function poll() {
   if (!polling) return;
   const now = Date.now() / 1000;
   for (const s of sats.values()) {
-    if (!s.busy && now >= s.nextFetch) loadPositions(s, now);
+    if (!sim && !s.busy && now >= s.nextFetch) loadPositions(s, now);
     if (now >= s.nextTle) loadTle(s, now);
   }
 }
@@ -308,26 +317,42 @@ function sampleAt(samples, now) {
 }
 
 const va = new THREE.Vector3(), vb = new THREE.Vector3();
-function updateSat(s, now) {
+function stateFromSamples(s, now) {
   const found = sampleAt(s.samples, now);
-  if (!found) {
-    s.state = null;
-    s.sprite.visible = s.link.visible = false;
-    return;
-  }
+  if (!found) return null;
   const [a, b] = Array.isArray(found) ? found : [found, found];
   const f = b.t > a.t ? (now - a.t) / (b.t - a.t) : 0;
-  const alt = a.alt + (b.alt - a.alt) * f;
   // Interpolate in 3D so the ±180° longitude seam needs no special case.
   geoToVec(a.lat, a.lng, a.alt, va);
   geoToVec(b.lat, b.lng, b.alt, vb);
   s.pos.copy(va).lerp(vb, f);
   const dAz = ((b.az - a.az + 540) % 360) - 180;
-  s.state = {
-    alt, lat: a.lat, lng: a.lng,
+  return {
+    alt: a.alt + (b.alt - a.alt) * f, lat: a.lat, lng: a.lng,
     az: (a.az + dAz * f + 360) % 360,
     el: a.el + (b.el - a.el) * f,
   };
+}
+
+function stateFromTle(s, ms) {
+  if (!s.satrec || !observerGd) return null;
+  const date = new Date(ms);
+  const pv = sgp4.propagate(s.satrec, date);
+  if (!pv || !pv.position) return null;
+  const gmst = sgp4.gstime(date);
+  const g = sgp4.eciToGeodetic(pv.position, gmst);
+  const look = sgp4.ecfToLookAngles(observerGd, sgp4.eciToEcf(pv.position, gmst));
+  const lat = g.latitude / DEG, lng = g.longitude / DEG;
+  geoToVec(lat, lng, g.height, s.pos);
+  return { alt: g.height, lat, lng, az: ((look.azimuth / DEG) + 360) % 360, el: look.elevation / DEG };
+}
+
+function updateSat(s, ms) {
+  s.state = sim ? stateFromTle(s, ms) : stateFromSamples(s, ms / 1000);
+  if (!s.state) {
+    s.sprite.visible = s.link.visible = false;
+    return;
+  }
 
   s.sprite.position.copy(s.pos);
   s.sprite.scale.setScalar(s.id === selectedId ? 0.036 : 0.022);
@@ -412,7 +437,8 @@ function refreshList() {
     } else {
       elev.textContent = '';
       elev.classList.remove('up');
-      sub.textContent = s.error ? s.error : s.samples.length ? '資料已過期，等待更新' : '載入中…';
+      sub.textContent = sim ? '沒有軌道資料（TLE），無法模擬'
+        : s.error ? s.error : s.samples.length ? '資料已過期，等待更新' : '載入中…';
     }
     sub.classList.toggle('err', !s.state && Boolean(s.error));
   });
@@ -603,8 +629,24 @@ function resize() {
 }
 window.addEventListener('resize', resize);
 
+// Simulation controls
+const simToggle = $('sim-toggle'), simSpeed = $('sim-speed'), simRate = $('sim-rate');
+function setSim(speed) { // null = back to live
+  sim = speed == null ? null : { fromSim: clockMs(), fromReal: Date.now(), speed };
+  const on = Boolean(sim);
+  simToggle.textContent = on ? '回到即時' : '加速模擬';
+  simToggle.setAttribute('aria-pressed', String(on));
+  simSpeed.hidden = simRate.hidden = !on;
+  simRate.textContent = `${simSpeed.value}×`;
+  $('clock').classList.toggle('sim', on);
+  for (const s of sats.values()) s.pathAt = -Infinity;
+  tickSlow();
+}
+simToggle.addEventListener('click', () => setSim(sim ? null : Number(simSpeed.value)));
+simSpeed.addEventListener('input', () => { if (sim) setSim(Number(simSpeed.value)); });
+
 function tickSlow() {
-  const nowMs = Date.now();
+  const nowMs = clockMs();
   const sun = subsolarPoint(nowMs);
   geoToVec(sun.lat, sun.lng, 0, earthUniforms.sunDir.value).normalize();
   $('clock').textContent = new Date(nowMs).toLocaleString('zh-TW', {
@@ -612,7 +654,7 @@ function tickSlow() {
     hour: '2-digit', minute: '2-digit', second: '2-digit',
   });
   for (const s of sats.values()) {
-    if (nowMs >= s.nextPath) { updatePath(s, nowMs); s.nextPath = nowMs + 30000; }
+    if (Math.abs(nowMs - s.pathAt) >= 30000) { updatePath(s, nowMs); s.pathAt = nowMs; }
   }
   refreshList();
   updateHint();
@@ -620,8 +662,8 @@ function tickSlow() {
 }
 
 function frame() {
-  const now = Date.now() / 1000;
-  for (const s of sats.values()) updateSat(s, now);
+  const ms = clockMs();
+  for (const s of sats.values()) updateSat(s, ms);
   if (view === 'space') controls.update(); else aimSky();
   updateLabels();
   renderer.render(scene, camera);
@@ -641,17 +683,19 @@ function showKeyNotice(reason) {
   a.target = '_blank';
   a.rel = 'noopener';
   a.textContent = 'n2yo.com/api';
-  p1.append(a, ' 註冊並取得 API Key，在 satellite-tracker 資料夾建立 .env 檔：');
+  p1.append(a, ' 註冊，在個人資料頁產生 API Key，填進程式資料夾裡的 .env 檔（沒有的話把 .env.example 複製成 .env）：');
   const code = document.createElement('code');
   code.textContent = 'N2YO_API_KEY=你的金鑰';
   const p2 = document.createElement('p');
-  p2.textContent = '然後重新執行 node server.js，再重新整理此頁。';
+  p2.textContent = '存檔後重新整理此頁即可，不用重新啟動。';
   n.append(h, p1, code, p2);
 }
 
 async function start() {
   const config = await api('/api/config');
   observer = config.observer;
+  if (config.version) $('version').textContent = `v${config.version}`;
+  observerGd = { latitude: observer.lat * DEG, longitude: observer.lng * DEG, height: (observer.alt || 0) / 1000 };
   buildObserver();
   taiwanLabel = makeLabel('place', observer.name);
   for (const [text, az] of [['北', 0], ['東', 90], ['南', 180], ['西', 270]]) {
@@ -670,7 +714,7 @@ async function start() {
   polling = config.hasKey;
   if (!config.hasKey) showKeyNotice('尚未設定 N2YO API Key');
   tickSlow();
-  setInterval(tickSlow, 1000);
+  setInterval(tickSlow, 250); // 4 Hz so the clock and list keep up at 200×
   frame();
 }
 

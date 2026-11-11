@@ -54,12 +54,18 @@ button:hover { background: rgba(255, 255, 255, .13); }
   border-radius: 10px;
 }
 .bar h1 { font-size: 16px; margin: 0; font-weight: 700; }
+#version { font-size: 12px; font-weight: 400; color: var(--muted); }
 #clock { color: var(--muted); font-variant-numeric: tabular-nums; }
 .segmented { display: flex; }
 .segmented button { border-radius: 0; }
 .segmented button:first-child { border-radius: 6px 0 0 6px; }
 .segmented button:last-child { border-radius: 0 6px 6px 0; border-left: 0; }
 .segmented button.active { background: var(--accent); color: #17130a; font-weight: 600; }
+#clock.sim { color: var(--accent); }
+.sim { display: flex; align-items: center; gap: 8px; }
+#sim-toggle[aria-pressed="true"] { background: var(--accent); color: #17130a; font-weight: 600; }
+#sim-speed { width: 140px; accent-color: var(--accent); }
+#sim-rate { min-width: 3.2em; color: var(--accent); font-weight: 600; font-variant-numeric: tabular-nums; }
 
 #panel {
   position: fixed; top: 12px; right: 12px; bottom: 12px;
