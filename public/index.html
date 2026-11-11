@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>台灣上空衛星</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/satellite.js@5.0.0/dist/satellite.min.js"></script>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <div id="labels" aria-hidden="true"></div>
+
+  <header class="bar">
+    <h1>台灣上空衛星</h1>
+    <time id="clock"></time>
+    <div class="segmented" role="group" aria-label="視角">
+      <button data-view="space" type="button">太空俯瞰</button>
+      <button data-view="sky" type="button">台灣仰望</button>
+    </div>
+    <button id="reset" type="button">重置視角</button>
+  </header>
+
+  <aside id="panel">
+    <h2>追蹤清單 <span id="count"></span></h2>
+    <ul id="list"></ul>
+    <form id="add">
+      <input id="add-id" inputmode="numeric" pattern="[0-9]{1,6}" placeholder="NORAD 編號" aria-label="NORAD 編號" required>
+      <button type="submit">加入</button>
+    </form>
+    <p id="quota"></p>
+  </aside>
+
+  <p id="hint"></p>
+  <div id="notice" hidden></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
