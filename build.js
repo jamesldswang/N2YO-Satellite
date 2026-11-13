@@ -22,7 +22,7 @@ const zip = `${out}.zip`;
   fs.rmSync(zip, { force: true });
   fs.mkdirSync(out, { recursive: true });
 
-  for (const f of ['server.js', 'package.json', 'README.md', '.env.example', 'start.cmd', 'start.vbs']) {
+  for (const f of ['server.js', 'collector.js', 'package.json', 'README.md', '.env.example', 'start.cmd', 'start.vbs', 'autostart.cmd']) {
     fs.copyFileSync(path.join(__dirname, f), path.join(out, f));
   }
   fs.cpSync(path.join(__dirname, 'public'), path.join(out, 'public'), { recursive: true });

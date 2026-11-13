@@ -17,5 +17,10 @@ If Not fso.FileExists(dir & "\.env") And fso.FileExists(dir & "\.env.example") T
 End If
 
 sh.Run node & " """ & dir & "\server.js""", 0, False
+
+' "start.vbs /background" (used by autostart.cmd at logon): server only, no browser.
+If WScript.Arguments.Count > 0 Then
+  If LCase(WScript.Arguments(0)) = "/background" Then WScript.Quit
+End If
 WScript.Sleep 1000
 sh.Run "http://localhost:8000"

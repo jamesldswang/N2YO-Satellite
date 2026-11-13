@@ -8,6 +8,7 @@ const path = require('path');
 const util = require('util');
 const zlib = require('zlib');
 const os = require('os');
+const { startCollector } = require('./collector');
 
 const ENV_FILE = path.join(__dirname, '.env');
 try { process.loadEnvFile(ENV_FILE); } catch { /* .env is optional */ }
@@ -416,4 +417,6 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`台灣上空衛星 ${VERSION}：http://localhost:${PORT}`);
   if (!apiKey()) console.log('尚未設定 N2YO_API_KEY，請見 README.md');
+  // 開始監聽才收集：重複啟動時第二個會因 port 被占用而結束，不會兩個一起寫檔
+  startCollector(CACHE_DIR);
 });

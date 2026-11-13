@@ -109,6 +109,13 @@ description: 修改、測試「台灣上空衛星」網頁（D:\Personal_Git\sat
   - `applyHistory()`（tickSlow）：`clouds.showAt(ms, archive.clouds, Boolean(sim))` 選 t ≤ ms 的最後一張（`CloudLayer` 最多快取 `MAX_CACHED` 張 2048 px，預先載入下一張）；星鏈選 t ≤ ms 的最後一份 TLE，比最新備份還晚就用最新資料，`StarlinkLayer.useDataset(file)` 換資料（Worker 重新 load，顆數不同會重建 Points）。
   - 星鏈 `update(ms, up, speed)`：外插最多 ±90 秒；Worker 結果的時間差超過 `max(5 分鐘, speed × 1.5 秒)` 才隱藏，不然高倍速回放時光點一直消失。
   - 測試回放：用 `DATA_DIR` 放幾張真的雲圖（檔名改成想要的時間）和星鏈備份，另開 port；用 DevTools Protocol 按 `#replay-toggle`、改 `#replay-pos` 的值並觸發 `input`，用 `performance.getEntriesByType('resource')` 看抓了哪些歷史檔。
+- **長期資料收集**（1.7.0，`collector.js`）：
+  - `server.listen` 成功後才 `startCollector(CACHE_DIR)`（重複啟動時第二個會 EADDRINUSE 結束，不會兩個一起寫檔）。每 5 分鐘一次，不管網頁有沒有開。
+  - 測站：氣象署 S3 `O-A0003-001.json`（約 360 站、每 10 分鐘，**不用授權碼**；O-A0001-001 自動站 876 站也在 S3）。寫 `weather-history/<台灣日期>.csv`（UTF-8 BOM），用 `站號|觀測時間` 去重（啟動時讀當天檔），過午夜 1 小時後把前一天壓成 `.csv.gz`。缺測值 -99 寫成空白。
+  - 東亞雲圖：`O-B0032-003`（1200 px 紅外線黑白，約 380 KB），觀測時間是 `CLOUDS_ARCHIVE_EVERY_MIN`（預設 60）的倍數才存，`clouds-eastasia/<UTC 年-月>/<stamp>Z.jpg`。Node 沒有 JPEG 解碼器，所以存原檔、不在伺服器上算雲量。
+  - 預設永久保留；`WEATHER_KEEP_DAYS`、`CLOUDS_ARCHIVE_KEEP_DAYS`、`COLLECT=0`。
+  - 測試：`DATA_DIR` 指到 scratchpad、另開 `PORT`，啟動兩次確認不會重複寫；注意 `migrateOldCache()` 會把專案的 `.cache/` 複製進測試資料夾，測完整個刪掉。
+  - 開機自動啟動：`autostart.cmd on|off`（在 Startup 資料夾建 `SatelliteTracker.lnk` → `wscript start.vbs /background`）。**Claude 不能自己執行 `on`**（會被權限擋，屬於常駐），要請使用者自己跑；測試時把腳本複製到 scratchpad、把 LNK 改成 scratchpad 路徑。
 - **瀏覽器記住的清單**（localStorage `tracked-satellites`）會蓋過 `DEFAULT_IDS`。
 - 這台電腦是 Windows，git 會出現 LF → CRLF 的警告，不影響。
 

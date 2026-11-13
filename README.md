@@ -1,6 +1,6 @@
 # 🛰️ 台灣上空衛星
 
-**版本：1.6.0**
+**版本：1.7.0**
 
 用 Three.js 顯示地球和衛星的即時位置。地球固定不轉，視角以台灣為中心，可以看出哪些衛星現在在台灣的地平線上、仰角和方位多少。資料來自 [N2YO REST API](https://www.n2yo.com/api/)。
 
@@ -60,13 +60,28 @@
 
 ### 回放
 
-- 先開啟 **衛星雲圖**、**星鏈 Starlink** 其中一個（或兩個），再按上方 **回放**。從有記錄的最早時間開始，用 600 倍速播放（10 分鐘 = 1 秒）。
+- 先開啟 **衛星雲圖**、**星鏈 Starlink** 其中一個（或兩個），再按上方 **回放**。從開啟的圖層都有記錄的最早時間開始，用 600 倍速播放（10 分鐘 = 1 秒）。
 - 下方的回放列：**⏸ 暫停／▶ 播放**、拖動時間軸跳到任何時間、選 60×、300×、600×、1800× 倍速、**結束回放**回到即時。播到現在會自動結束。
 - **雲圖**：每 10 分鐘一張，換成那個時刻之前最近的一張。沒有記錄的時段（例如伺服器關著的時候）會沿用最接近的那張，差超過 1 小時就變淡並註明。
 - **星鏈**：改用那個時刻之前最近的一份 TLE 備份來推算位置。高倍速時光點會一跳一跳的（背景計算一次約 0.2 秒，1800× 時等於跳 6 分鐘）。
 - 追蹤清單的衛星沒有歷史資料，用現在的 TLE 往回推算，回放 1、2 天內都很準。
 - **歷史資料只有在伺服器開著時才會累積**：開過一次衛星雲圖或星鏈之後，伺服器會在背景持續記錄，網頁關掉也一樣。雲圖每 10 分鐘一張、保留 24 小時（約 490 MB）；星鏈每 2.5 小時一份、保留 30 天。
 - 資料放在資料資料夾（`%LOCALAPPDATA%\SatelliteTracker`），不在程式資料夾裡，所以換新版也會沿用。1.5.0 以前放在程式資料夾的 `.cache/`，新版第一次啟動時會自動複製過去。
+
+### 長期資料收集（給之後做預測用）
+
+伺服器開著就會在背景收集下面兩種資料，不用開網頁，也不用先開哪個圖層。兩種都是中央氣象署公開在 S3 上的資料，不用授權碼。
+
+| 資料 | 來源 | 存在資料資料夾的 | 大小 |
+|------|------|-----------------|------|
+| 氣象測站：溫度、濕度、氣壓、風向、風速、陣風、雨量、日照、紫外線、天氣 | `O-A0003-001`（約 360 站，每 10 分鐘） | `weather-history/<台灣日期>.csv`，前幾天的自動壓成 `.csv.gz` | 每天約 5 MB，壓縮後約 1 MB |
+| 東亞雲圖（向日葵紅外線黑白，1200 px） | `O-B0032-003` | `clouds-eastasia/<UTC 年-月>/<UTC 時間>Z.jpg`，每小時整點一張 | 每張約 380 KB，一天約 9 MB |
+
+- CSV 是 UTF-8（有 BOM），Excel 可以直接開。欄位：`obs_time`（台灣時間）、`station_id`、`station_name`、`county`、`lat`、`lon`、`alt_m`、`temp_c`、`humidity_pct`、`pressure_hpa`、`wind_dir_deg`、`wind_speed_ms`、`gust_ms`、`precip_mm`（當日累積）、`sunshine_h`、`uv_index`、`weather`。缺測是空白。
+- 預設**永久保留**。`.env` 可以設 `WEATHER_KEEP_DAYS`、`CLOUDS_ARCHIVE_KEEP_DAYS`（天數）、`CLOUDS_ARCHIVE_EVERY_MIN`（東亞雲圖幾分鐘存一張，最少 10），或 `COLLECT=0` 整個關掉。
+- 24 小時回放用的全盤面雲圖（每張 3.6 MB）太大，不長期保存，長期只留東亞的這份。
+- **要持續收集，伺服器就要一直開著**：在程式資料夾執行一次 `autostart.cmd on`，之後每次登入 Windows 伺服器就會在背景自動啟動（不開瀏覽器）；`autostart.cmd off` 關掉，`autostart.cmd` 查看狀態。電腦**睡眠或關機時收不到**，要連續收集請把電源設定改成插電時不睡眠。
+- 想先拿過去的資料來試預測，不用等自己累積：氣象署 [CODiS](https://codis.cwa.gov.tw/) 可以下載測站歷史資料，[Open-Meteo](https://open-meteo.com/) 有免費的全球歷史氣象資料。
 
 ### 過境預報
 
@@ -89,11 +104,12 @@
 
 ### 方式一：使用打包好的版本（推薦）
 
-1. 到 [GitHub Releases](https://github.com/jamesldswang/N2YO-Satellite/releases/latest) 下載 `SatelliteTracker-1.3.0-win-x64.zip`，按右鍵選「解壓縮全部」，放到固定的位置。
+1. 到 [GitHub Releases](https://github.com/jamesldswang/N2YO-Satellite/releases/latest) 下載 `SatelliteTracker-<版號>-win-x64.zip`，按右鍵選「解壓縮全部」，放到固定的位置。
 2. 打開資料夾，雙擊 **`start.cmd`**。
 3. 第一次執行會用記事本打開 `.env`，把金鑰填在 `N2YO_API_KEY=` 後面，存檔。
 4. 瀏覽器會自動打開 <http://localhost:8000>；填好金鑰後重新整理頁面即可，不用重新啟動。
 5. 要結束時，關掉 `start.cmd` 的黑色視窗。
+6. （選用）想讓伺服器每次登入就在背景啟動、持續收集資料：在資料夾視窗的網址列輸入 `cmd` 按 Enter，開啟命令提示字元，執行 `autostart.cmd on`。換新版時要在新版資料夾重新執行一次。
 
 > 系統需求：Windows 10／11 64 位元，需要網路。已內含 Node.js（原版、有數位簽章的 `node.exe`），不用另外安裝。
 >
@@ -139,7 +155,7 @@ npm run dist
 - `dist\SatelliteTracker-<版號>-win-x64\`：可以直接執行的資料夾
 - `dist\SatelliteTracker-<版號>-win-x64.zip`：同一個資料夾的壓縮檔（約 33 MB）
 
-內容是 `server.js`、`public/`、`start.cmd`、`start.vbs`、`.env.example`、`README.md`，加上打包這台電腦上的 `node.exe` 和它的授權條款 `node-LICENSE.txt`。**`.env`（金鑰）不會被打包進去。**
+內容是 `server.js`、`collector.js`、`public/`、`start.cmd`、`start.vbs`、`autostart.cmd`、`.env.example`、`README.md`，加上打包這台電腦上的 `node.exe` 和它的授權條款 `node-LICENSE.txt`。**`.env`（金鑰）不會被打包進去。**
 
 ### 發布到 GitHub Release
 
@@ -197,6 +213,7 @@ NORAD 編號可以在 [n2yo.com](https://www.n2yo.com/) 或 [CelesTrak](https://
 | 衛星即時位置、對台灣的方位角與仰角 | `positions`（一次取 300 秒） | 每顆約每 3.5 分鐘 | 1000 |
 | 軌道線、加速模擬、過境預報（由 satellite.js 以 SGP4 推算） | `tle` | 每顆每 6 小時 | 1000 |
 | 衛星雲圖（中央氣象署，不是 N2YO） | `O-B0033-001`（公開，不用授權碼） | 每 10 分鐘，開過一次之後伺服器會在背景持續記錄 | 無 |
+| 氣象測站、東亞雲圖（中央氣象署，長期收集） | `O-A0003-001`、`O-B0032-003`（公開，不用授權碼） | 每 5 分鐘檢查，伺服器開著就收集 | 無 |
 | 星鏈（CelesTrak，不是 N2YO） | `gp.php?GROUP=starlink` | 每 2.5 小時，存在資料資料夾，另存歷史備份 | CelesTrak 2 小時內不能重複下載 |
 | 測試工具比對過境預報（頁面本身不用） | `radiopasses`、`visualpasses` | 執行 `npm run check:passes` 時 | 各 100 |
 
@@ -221,6 +238,8 @@ NORAD 編號可以在 [n2yo.com](https://www.n2yo.com/) 或 [CelesTrak](https://
 | 資料資料夾位置 | `.env` | `DATA_DIR=`（預設 `%LOCALAPPDATA%\SatelliteTracker`） |
 | 雲圖歷史保留時間 | `.env` | `CLOUDS_KEEP_HOURS=24` |
 | 星鏈歷史保留時間 | `.env` | `STARLINK_KEEP_DAYS=30` |
+| 長期收集（測站、東亞雲圖） | `.env` | `WEATHER_KEEP_DAYS`、`CLOUDS_ARCHIVE_KEEP_DAYS`（天，預設永久）、`CLOUDS_ARCHIVE_EVERY_MIN=60`、`COLLECT=0`（關掉） |
+| 收集哪些測站欄位 | `collector.js` | `COLUMNS`、`stationRow()` |
 | 連接埠 | `.env` | `PORT=8000` |
 | 版本號 | `package.json` | `"version"`，頁面標題旁會自動顯示 |
 
@@ -235,6 +254,7 @@ NORAD 編號可以在 [n2yo.com](https://www.n2yo.com/) 或 [CelesTrak](https://
 ```
 satellite-tracker/
 ├── server.js          # 靜態檔案伺服器 + N2YO API 代理（含快取）、星鏈和氣象署雲圖下載。N2YO 不支援 CORS，也讓金鑰不出現在前端
+├── collector.js       # 長期資料收集：氣象署測站（CSV）、東亞雲圖（每小時一張）
 ├── public/
 │   ├── index.html     # 頁面
 │   ├── app.js         # Three.js 場景、衛星位置內插、SGP4 軌道線、加速模擬、過境預報面板
@@ -252,7 +272,8 @@ satellite-tracker/
 │   └── release-body.js  # 產生 Release 說明文字（release.sh 會呼叫）
 ├── build.js           # 打包腳本（npm run dist）
 ├── start.cmd          # 啟動檔：有視窗，關掉就停止
-├── start.vbs          # 啟動檔：背景執行，不跳出視窗
+├── start.vbs          # 啟動檔：背景執行，不跳出視窗（加 /background 不開瀏覽器）
+├── autostart.cmd      # 開關「登入 Windows 時自動在背景啟動」
 ├── .claude/skills/satellite-tracker/SKILL.md  # 給 Claude Code 的專案說明
 ├── .env.example       # 環境變數範本（複製成 .env）
 ├── .cache/            # 1.5.0 以前的資料位置（新版啟動時會複製到 %LOCALAPPDATA%\SatelliteTracker）
@@ -278,11 +299,17 @@ satellite-tracker/
 - **雲圖只涵蓋向日葵看得到的半個地球**：歐洲、非洲、美洲沒有雲。
 - **回放只能看伺服器開著時記錄到的時段**：氣象署和 CelesTrak 都只提供最新資料，所以要伺服器自己存。雲圖只保留 24 小時。
 - **雲圖歷史很佔空間**：每天約 490 MB（保留 24 小時就維持在這個量）。不需要的話可以在 `.env` 把 `CLOUDS_KEEP_HOURS` 調小，或刪掉資料資料夾裡的 `clouds-history`（刪掉之後要再開一次衛星雲圖才會重新記錄）。
+- **長期收集要電腦醒著**：睡眠、關機、伺服器沒開的時段資料就是空的，事後也補不回來（氣象署只提供最新一筆）；需要補的話用 CODiS 的歷史資料。
 - **已墜落或編號錯誤的衛星**：清單上會顯示錯誤訊息，按 ✕ 移除即可。
 
 ---
 
 ## 版本紀錄
+
+### 1.7.0（2026-11-13）
+
+- 新增 **長期資料收集**（`collector.js`）：伺服器開著就在背景收集氣象署約 360 個測站的溫度、濕度、氣壓、風向風速、雨量等（每 10 分鐘，存成每天一個 CSV），以及每小時一張東亞紅外線雲圖，預設永久保留，給之後做預測用
+- 新增 `autostart.cmd`：開關「登入 Windows 時自動在背景啟動伺服器」；`start.vbs /background` 只啟動伺服器、不開瀏覽器
 
 ### 1.6.0（2026-11-13）
 
