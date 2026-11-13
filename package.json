@@ -1,6 +1,6 @@
 {
   "name": "satellite-tracker",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "台灣上空衛星：Three.js 地球與 N2YO 即時衛星位置",
   "private": true,
   "engines": {

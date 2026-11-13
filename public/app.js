@@ -687,6 +687,7 @@ function updateLabels() {
   }
   for (const { el, world } of compassLabels) placeLabel(el, world, view === 'sky');
   placeLabel(taiwanLabel, up, view === 'space' && !hiddenByEarth(up.clone().multiplyScalar(1.001)));
+  placeGridLabel();
 }
 
 function resize() {
@@ -953,6 +954,135 @@ function renderCloudInfo() {
 }
 $('clouds-toggle').addEventListener('click', () => setClouds(!clouds.enabled));
 
+// 經緯線：每 15° 一條虛線，赤道和本初子午線較亮。半徑比雲球（1.006）高一點，開雲圖時也看得到；
+// 有深度測試，地球背面的線會被擋住。預設關閉，開關記在這個瀏覽器。
+const GRID_KEY = 'graticule-enabled';
+const GRID_STEP = 15;
+const graticule = (() => {
+  const g = new THREE.Group();
+  const R_KM = 0.008 * EARTH_KM;
+  const dashed = (points, strong) => {
+    const l = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(points),
+      new THREE.LineDashedMaterial({
+        color: strong ? 0xd6e4f5 : 0x8fa6c4, transparent: true, opacity: strong ? 0.75 : 0.45,
+        dashSize: 0.025, gapSize: 0.018, depthWrite: false,
+      }),
+    );
+    l.computeLineDistances();
+    l.renderOrder = 2;
+    l.userData.baseColor = l.material.color.getHex();
+    l.userData.baseOpacity = l.material.opacity;
+    return l;
+  };
+  for (let lat = -90 + GRID_STEP; lat < 90; lat += GRID_STEP) {
+    const ring = [];
+    for (let lng = -180; lng <= 180; lng += 2) ring.push(geoToVec(lat, lng, R_KM));
+    const l = dashed(ring, lat === 0);
+    l.userData.lat = lat;
+    g.add(l);
+  }
+  for (let lng = -180; lng < 180; lng += GRID_STEP) {
+    const arc = [];
+    for (let lat = -90; lat <= 90; lat += 2) arc.push(geoToVec(lat, lng, R_KM));
+    const l = dashed(arc, lng === 0);
+    l.userData.lng = lng;
+    g.add(l);
+  }
+  g.userData.radius = 1 + R_KM / EARTH_KM;
+  g.visible = false;
+  scene.add(g);
+  return g;
+})();
+// 點到經緯線時，在點的位置顯示它的度數，並把那條線標亮（再點空白處或關掉經緯線就消失）
+const GRID_PICK_PX = 12; // 點的位置離線多近（像素）才算點到
+const gridLabel = makeLabel('grid', '');
+let gridPick = null; // { line, world }
+
+function gridName(line) {
+  const { lat, lng } = line.userData;
+  if (lat !== undefined) return lat === 0 ? '赤道 0°' : `${lat > 0 ? '北緯' : '南緯'} ${Math.abs(lat)}°`;
+  if (lng === 0) return '本初子午線 0°';
+  if (Math.abs(lng) === 180) return '經度 180°';
+  return `${lng > 0 ? '東經' : '西經'} ${Math.abs(lng)}°`;
+}
+
+function setGridPick(pick) {
+  if (gridPick) {
+    const m = gridPick.line.material;
+    m.color.setHex(gridPick.line.userData.baseColor);
+    m.opacity = gridPick.line.userData.baseOpacity;
+  }
+  gridPick = pick;
+  if (pick) {
+    pick.line.material.color.set(0xf5c451);
+    pick.line.material.opacity = 1;
+    gridLabel.textContent = gridName(pick.line);
+  } else gridLabel.style.display = 'none';
+}
+
+const gridRay = new THREE.Raycaster();
+const gridSphere = new THREE.Sphere(new THREE.Vector3(), 1);
+const pickNdc = new THREE.Vector2();
+function toScreen(world) {
+  const p = world.clone().project(camera);
+  return { x: ((p.x + 1) / 2) * canvas.clientWidth, y: ((1 - p.y) / 2) * canvas.clientHeight };
+}
+
+function pickGrid(clientX, clientY) {
+  if (!graticule.visible) return null;
+  const rect = canvas.getBoundingClientRect();
+  const px = clientX - rect.left, py = clientY - rect.top;
+  pickNdc.set((px / rect.width) * 2 - 1, -(py / rect.height) * 2 + 1);
+  gridRay.setFromCamera(pickNdc, camera);
+  gridSphere.radius = graticule.userData.radius;
+  const hit = gridRay.ray.intersectSphere(gridSphere, new THREE.Vector3());
+  if (!hit) return null;
+  const lat = Math.asin(THREE.MathUtils.clamp(hit.y / hit.length(), -1, 1)) / DEG;
+  const lng = Math.atan2(-hit.z, hit.x) / DEG;
+  const altKm = (gridSphere.radius - 1) * EARTH_KM;
+  // 最近的緯線和經線各取一個點，看哪個在畫面上離點的位置最近
+  const candidates = [];
+  const latLine = Math.round(lat / GRID_STEP) * GRID_STEP;
+  if (Math.abs(latLine) < 90) candidates.push({ key: 'lat', v: latLine, world: geoToVec(latLine, lng, altKm) });
+  let lngLine = Math.round(lng / GRID_STEP) * GRID_STEP;
+  if (lngLine === 180) lngLine = -180;
+  candidates.push({ key: 'lng', v: lngLine, world: geoToVec(lat, lngLine, altKm) });
+  let best = null;
+  for (const c of candidates) {
+    const s = toScreen(c.world);
+    const d = Math.hypot(s.x - px, s.y - py);
+    if (d <= GRID_PICK_PX && (!best || d < best.d)) best = { ...c, d };
+  }
+  if (!best) return null;
+  const line = graticule.children.find((l) => l.userData[best.key] === best.v);
+  return line ? { line, world: best.world } : null;
+}
+
+// 拖曳旋轉不算點擊：按下到放開移動不超過 5 像素才算
+let gridDown = null;
+canvas.addEventListener('pointerdown', (e) => { gridDown = { x: e.clientX, y: e.clientY }; });
+canvas.addEventListener('pointerup', (e) => {
+  if (!gridDown || Math.hypot(e.clientX - gridDown.x, e.clientY - gridDown.y) > 5) return;
+  gridDown = null;
+  if (graticule.visible) setGridPick(pickGrid(e.clientX, e.clientY));
+});
+
+// updateLabels 每幀呼叫
+function placeGridLabel() {
+  if (!gridPick) return;
+  const hidden = view === 'space' && hiddenByEarth(gridPick.world);
+  placeLabel(gridLabel, gridPick.world, graticule.visible && !hidden);
+}
+
+function setGraticule(on) {
+  graticule.visible = on;
+  if (!on) setGridPick(null);
+  $('grid-toggle').setAttribute('aria-pressed', String(on));
+  try { localStorage.setItem(GRID_KEY, on ? '1' : '0'); } catch { /* optional */ }
+}
+$('grid-toggle').addEventListener('click', () => setGraticule(!graticule.visible));
+
 // ---------- 回放 ----------
 // 用伺服器記錄的歷史資料（雲圖每 10 分鐘一張、保留 24 小時；星鏈 TLE 每 2.5 小時一份、保留 30 天），
 // 把時鐘撥回過去播放。只回放有開啟的圖層；追蹤清單的衛星用 SGP4 往回推算。
@@ -1015,7 +1145,9 @@ async function startReplay() {
     $('replay-time').textContent = '還沒有歷史資料。伺服器開著時會自動累積：雲圖每 10 分鐘一張，星鏈每 2.5 小時一份。';
     return;
   }
-  const start = Math.min(...starts);
+  // 從「每個有開的圖層都有歷史資料」的時刻開始：星鏈備份通常比雲圖早一天以上，
+  // 用最早的會先播很久不會動、調淡的第一張雲圖。
+  const start = Math.max(...starts);
   replay = { speed: Number(replaySpeed.value), playing: true };
   replayPos.disabled = replayPlay.disabled = false;
   replayPos.min = String(start);
@@ -1127,6 +1259,9 @@ async function start() {
   let cloudsOn = params.get('clouds') === '1';
   try { cloudsOn ||= localStorage.getItem(CLOUDS_KEY) === '1'; } catch { /* optional */ }
   if (cloudsOn) setClouds(true);
+  let gridOn = params.get('grid') === '1';
+  try { gridOn ||= localStorage.getItem(GRID_KEY) === '1'; } catch { /* optional */ }
+  if (gridOn) setGraticule(true);
   updateReplayButton();
 
   loadIds().forEach(createSat);

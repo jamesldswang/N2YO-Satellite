@@ -140,7 +140,17 @@ export class CloudLayer {
     }
     if (!want) { if (this.live) this.display(this.live); return; }
     const hit = this.cache.get(want.file);
-    if (hit) { hit.used = Date.now(); this.display(hit); } else this.fetchFrame(want);
+    if (hit) { hit.used = Date.now(); this.display(hit); } else {
+      this.fetchFrame(want);
+      // 高倍速時下載＋解碼比換圖慢，等到的時候時鐘已經走到下一張；
+      // 先顯示已經載好、時間最接近（t ≤ ms）的那張，不然會一直停在最新的雲圖
+      let best = null;
+      for (const e of this.cache.values()) if (e.t <= ms && (!best || e.t > best.t)) best = e;
+      if (best && (!this.shown || this.shown === this.live || best.t > this.shown.t || this.shown.t > ms)) {
+        best.used = Date.now();
+        this.display(best);
+      }
+    }
     const next = frames[frames.indexOf(want) + 1]; // 回放時先把下一張載好，換圖才不會卡
     if (next && !this.cache.has(next.file)) this.fetchFrame(next);
   }

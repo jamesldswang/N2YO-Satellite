@@ -46,6 +46,7 @@ button:hover { background: rgba(255, 255, 255, .13); }
 }
 .label.selected { background: var(--accent); color: #17130a; }
 .label.compass { background: none; color: var(--accent); font-size: 17px; font-weight: 600; margin: -13px 0 0 -8px; pointer-events: none; }
+.label.grid { background: rgba(10, 14, 24, 0.85); color: #f5c451; border: 1px solid #f5c451; font-weight: 600; pointer-events: none; }
 .label.place { background: none; color: var(--accent); font-weight: 600; pointer-events: none; }
 
 .bar {
@@ -69,6 +70,7 @@ button:hover { background: rgba(255, 255, 255, .13); }
 .starlink { display: flex; align-items: center; gap: 8px; }
 #starlink-toggle[aria-pressed="true"] { background: #d9f1ff; color: #0b1622; font-weight: 600; }
 #clouds-toggle[aria-pressed="true"] { background: #eef2f6; color: #0b1622; font-weight: 600; }
+#grid-toggle[aria-pressed="true"] { background: #eef2f6; color: #0b1622; font-weight: 600; }
 #clouds-info.stale { color: var(--accent); }
 #starlink-info, #clouds-info { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .sim { display: flex; align-items: center; gap: 8px; }
