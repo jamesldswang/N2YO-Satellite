@@ -240,6 +240,7 @@ NORAD 編號可以在 [n2yo.com](https://www.n2yo.com/) 或 [CelesTrak](https://
 | 星鏈歷史保留時間 | `.env` | `STARLINK_KEEP_DAYS=30` |
 | 長期收集（測站、東亞雲圖） | `.env` | `WEATHER_KEEP_DAYS`、`CLOUDS_ARCHIVE_KEEP_DAYS`（天，預設永久）、`CLOUDS_ARCHIVE_EVERY_MIN=60`、`COLLECT=0`（關掉） |
 | 收集哪些測站欄位 | `collector.js` | `COLUMNS`、`stationRow()` |
+| 地球日間貼圖 | `public/app.js` | `loadInto(earthUniforms.dayMap, …)`，檔案放 `public/textures/`（等距長方投影，左邊是 180°W） |
 | 連接埠 | `.env` | `PORT=8000` |
 | 版本號 | `package.json` | `"version"`，頁面標題旁會自動顯示 |
 
@@ -264,7 +265,8 @@ satellite-tracker/
 │   ├── clouds.js      # 衛星雲圖圖層（氣象署向日葵紅外線雲圖，shader 換算靜止衛星投影；回放時換成歷史雲圖）
 │   ├── passes.js      # 過境預報演算法（頁面和測試工具共用）
 │   ├── passes-worker.js  # 在背景執行緒計算過境預報
-│   └── style.css      # 樣式
+│   ├── style.css      # 樣式
+│   └── textures/      # 地球日間貼圖（NASA Blue Marble 5400×2700）
 ├── tools/
 │   ├── check-sgp4.js  # 測試工具：比對 SGP4 推算和 N2YO 的位置
 │   ├── check-passes.js  # 測試工具：比對過境預報和 N2YO 的過境預報
@@ -286,7 +288,7 @@ satellite-tracker/
 
 ## 已知限制
 
-- **需要網路**：Three.js、satellite.js 和地球貼圖都從 CDN 載入，衛星資料也要連 N2YO。
+- **需要網路**：Three.js、satellite.js 和夜晚燈光貼圖從 CDN 載入，衛星資料也要連 N2YO（日間地球貼圖在本機）。
 - **只有這台電腦看得到**：伺服器只聽 `127.0.0.1`，手機或其他電腦連不到。
 - **星鏈的光點沒有名稱**：只畫位置，不能點選、不會出現在追蹤清單和過境預報。要看某一顆的詳細資料，用 NORAD 編號加進追蹤清單。
 - **星鏈資料最多晚 2.5 小時**：新發射的那一批要等 CelesTrak 更新、伺服器重新下載後才會出現。
@@ -305,6 +307,10 @@ satellite-tracker/
 ---
 
 ## 版本紀錄
+
+### 下一版（未發布）
+
+- 地球日間貼圖換成 NASA Blue Marble Next Generation（11 月，含海底地形），解析度從 2048×1024 提高到 5400×2700，改放在本機 `public/textures/`
 
 ### 1.7.0（2026-11-13）
 

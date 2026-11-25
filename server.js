@@ -327,7 +327,7 @@ function sendJson(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
-const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
+const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.jpg': 'image/jpeg', '.png': 'image/png' };
 
 function serveStatic(pathname, res) {
   let decoded;

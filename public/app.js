@@ -70,14 +70,15 @@ const earthUniforms = {
 };
 const loader = new THREE.TextureLoader();
 loader.setCrossOrigin('anonymous');
-function loadInto(uniform, file) {
-  loader.load(`${TEX}/${file}`, (tex) => {
+function loadInto(uniform, url) {
+  loader.load(url, (tex) => {
     tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
     uniform.value = tex;
-  }, undefined, () => console.warn(`無法載入地球貼圖 ${file}`));
+  }, undefined, () => console.warn(`無法載入地球貼圖 ${url}`));
 }
-loadInto(earthUniforms.dayMap, 'earth_atmos_2048.jpg');
-loadInto(earthUniforms.nightMap, 'earth_lights_2048.png');
+// 日間：NASA Blue Marble Next Generation（2004 年 11 月，含海底地形），5400×2700，放在本機
+loadInto(earthUniforms.dayMap, 'textures/earth_bluemarble_5400.jpg');
+loadInto(earthUniforms.nightMap, `${TEX}/earth_lights_2048.png`);
 
 const earth = new THREE.Mesh(
   new THREE.SphereGeometry(1, 128, 96),
