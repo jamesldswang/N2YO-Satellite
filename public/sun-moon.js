@@ -23,7 +23,8 @@ const MOON_MIN_PX_SPACE = 4;
 // 公式：The Astronomical Almanac 的 low-precision lunar coordinates。
 // gmst（度）：給的話用這個地球角度換算經度（畫太空中固定的軌道線用），不給就用 ms 當時的
 const gmstDeg = (ms) => 280.46061837 + 360.98564736629 * (ms / 86400000 + 2440587.5 - 2451545);
-export function moonPosition(ms, gmst = gmstDeg(ms)) {
+// 地心黃道經緯度（弧度）和距離（地球半徑）
+export function moonEcliptic(ms) {
   const d = ms / 86400000 + 2440587.5 - 2451545; // 從 J2000 起的天數
   const T = d / 36525;
   const s = (a, b) => Math.sin((a + b * T) * DEG);
@@ -35,7 +36,11 @@ export function moonPosition(ms, gmst = gmstDeg(ms)) {
     - 0.28 * s(318.3, 6003.15) - 0.17 * s(217.6, -407332.21)) * DEG;
   const parallax = (0.9508 + 0.0518 * c(135.0, 477198.87) + 0.0095 * c(259.3, -413335.36)
     + 0.0078 * c(235.7, 890534.22) + 0.0028 * c(269.9, 954397.74)) * DEG;
-  const dist = 1 / Math.sin(parallax);
+  return { lon, lat, dist: 1 / Math.sin(parallax), d };
+}
+
+export function moonPosition(ms, gmst = gmstDeg(ms)) {
+  const { lon, lat, dist, d } = moonEcliptic(ms);
   // 黃道 → 赤道
   const eps = (23.439 - 0.00000036 * d) * DEG;
   const x = Math.cos(lat) * Math.cos(lon);

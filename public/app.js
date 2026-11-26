@@ -12,6 +12,7 @@ import { satInfo, CATALOG, initialName } from './sat-info.js';
 import { makeTail, setTailPoints, disposeTail, tailResolution, TAIL_POINTS } from './tail.js';
 import { SunMoon, phaseName } from './sun-moon.js';
 import { TaiwanTiles } from './taiwan-tiles.js';
+import { SolarSystem } from './solar-system.js';
 
 const sgp4 = window.satellite;
 
@@ -240,6 +241,8 @@ const sats = new Map();
 let selectedId = null;
 let view = 'space';
 let spin = false; // 地球自轉模式（見 setSpin）
+let solar = null;  // 太陽系示意模式（SolarSystem，見 setSolar）
+const solarOn = () => Boolean(solar?.on);
 let polling = false;
 
 function makeLabel(className, text) {
@@ -813,7 +816,9 @@ function setView(next) {
 
 function updateHint() {
   let text = '拖曳移動・右鍵（或 Shift＋左鍵）拖曳斜看・滾輪縮放・彩色直線連接台灣與地平線上的衛星・點選清單可標示軌道';
-  if (view === 'sky') {
+  if (solarOn()) {
+    text = '太陽系示意：拖曳旋轉・右鍵拖曳平移・滾輪縮放・方向是真的；距離開根號縮放、大小放大（不是真實比例）';
+  } else if (view === 'sky') {
     const known = [...sats.values()].filter((s) => s.state);
     text = known.length && !known.some((s) => s.state.el > 0)
       ? '目前清單中沒有衛星在台灣的地平線上'
@@ -832,7 +837,7 @@ $('reset').addEventListener('click', () => {
 
 let drag = null;
 canvas.addEventListener('pointerdown', (e) => {
-  if (view !== 'sky') return;
+  if (view !== 'sky' || solarOn()) return;
   drag = { x: e.clientX, y: e.clientY };
   canvas.setPointerCapture(e.pointerId);
 });
@@ -847,7 +852,7 @@ const endDrag = () => { drag = null; };
 canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', endDrag);
 canvas.addEventListener('wheel', (e) => {
-  if (view !== 'sky') return;
+  if (view !== 'sky' || solarOn()) return;
   e.preventDefault();
   camera.fov = THREE.MathUtils.clamp(camera.fov * (e.deltaY > 0 ? 1.08 : 0.92), 20, 100);
   camera.updateProjectionMatrix();
@@ -911,21 +916,32 @@ function resize() {
   renderer.getDrawingBufferSize(tailResolution.value);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
+  solar?.resize(w, h);
 }
 window.addEventListener('resize', resize);
 
 // Simulation controls
 const simToggle = $('sim-toggle'), simSpeed = $('sim-speed'), simRate = $('sim-rate');
-// 倍速滑桿是對數刻度：位置 0–1000 對應 1–10000 倍（每 250 格乘 10）。取整到 2 位有效數字，顯示比較整齊
-const SIM_MAX_SPEED = 10000;
-const SIM_STEPS_PER_DECADE = 1000 / Math.log10(SIM_MAX_SPEED);
+// 倍速滑桿是對數刻度：位置 0–1000 對應 1–simMaxSpeed 倍（平常 10000，每 250 格乘 10；太陽系模式 100 萬）。
+// 取整到 2 位有效數字，顯示比較整齊
+const SIM_MAX_SPEED = 10000, SOLAR_MAX_SPEED = 1e6;
+let simMaxSpeed = SIM_MAX_SPEED;
+const stepsPerDecade = () => 1000 / Math.log10(simMaxSpeed);
 function speedFromSlider() {
-  const v = 10 ** (Number(simSpeed.value) / SIM_STEPS_PER_DECADE);
+  const v = 10 ** (Number(simSpeed.value) / stepsPerDecade());
   if (v < 20) return Math.max(1, Math.round(v));
   const unit = 10 ** (Math.floor(Math.log10(v)) - 1);
   return Math.round(v / unit) * unit;
 }
-const sliderFor = (speed) => String(Math.round(Math.log10(speed) * SIM_STEPS_PER_DECADE));
+const sliderFor = (speed) => String(Math.round(Math.log10(speed) * stepsPerDecade()));
+// 換倍速上限（滑桿位置依新的刻度重算，倍速不變；超過新上限的降到上限）
+function setSimMax(max) {
+  const cur = sim ? sim.speed : speedFromSlider();
+  simMaxSpeed = max;
+  simSpeed.setAttribute('aria-label', `模擬倍速（對數刻度，1–${max.toLocaleString()} 倍）`);
+  simSpeed.value = sliderFor(Math.min(cur, max));
+  if (sim && !replay && sim.speed > max) setSim(max);
+}
 // speed null = back to live; atMs = simulated time to start from (default: carry on from now).
 function setSim(speed, atMs) {
   sim = speed == null ? null : { fromSim: atMs ?? clockMs(), fromReal: Date.now(), speed };
@@ -1120,15 +1136,17 @@ function tickSlow() {
   });
   // 軌道線每 30 秒（模擬時間）重算；高倍速時改成約每 0.15 秒真實時間一次，1000 倍時才不會每一幀都重算
   const pathEvery = Math.max(30000, (sim ? sim.speed : 1) * 150);
+  // 太陽系模式看不到地球畫面，而且倍速可到 100 萬：軌道線、過境預報、回放資料都先不算，回到地球畫面時再算
+  const earthShown = !solarOn();
   for (const s of sats.values()) {
-    if (Math.abs(nowMs - s.pathAt) >= pathEvery) { updatePath(s, nowMs); s.pathAt = nowMs; }
+    if (earthShown && Math.abs(nowMs - s.pathAt) >= pathEvery) { updatePath(s, nowMs); s.pathAt = nowMs; }
   }
   refreshList();
   updateHint();
   poll();
-  updatePasses();
+  if (earthShown) updatePasses();
   updateReplay();
-  applyHistory();
+  if (earthShown) applyHistory();
   renderStarlinkInfo();
   renderCloudInfo();
   renderWeatherInfo();
@@ -1325,7 +1343,7 @@ function pickGrid(clientX, clientY) {
 
 // 拖曳旋轉不算點擊：按下到放開移動不超過 5 像素才算
 let gridDown = null;
-canvas.addEventListener('pointerdown', (e) => { gridDown = e.button === 0 && !e.shiftKey ? { x: e.clientX, y: e.clientY } : null; });
+canvas.addEventListener('pointerdown', (e) => { gridDown = e.button === 0 && !e.shiftKey && !solarOn() ? { x: e.clientX, y: e.clientY } : null; });
 canvas.addEventListener('pointerup', (e) => {
   if (!gridDown || Math.hypot(e.clientX - gridDown.x, e.clientY - gridDown.y) > 5) return;
   gridDown = null;
@@ -1450,6 +1468,46 @@ function placeSunMoonLabels() {
 }
 $('sun-toggle').addEventListener('click', () => setSunShown(!sunMoon.sunOn));
 $('moon-toggle').addEventListener('click', () => setMoonShown(!sunMoon.moonOn));
+
+// 太陽系示意模式（solar-system.js）：獨立的場景和鏡頭，地球畫面的東西全部隱藏，退出時原樣回來。
+// 行星公轉很慢，所以倍速上限提高到 SOLAR_MAX_SPEED；還在即時的話自動開 SOLAR_SIM_SPEED 倍（地球約 5 分鐘一圈），
+// 退出時如果倍速是這裡開的（而且沒改過）就回到原本的倍速（地球自轉開著就回 200 倍，不然回到即時），上限降回 10000。
+const SOLAR_SIM_SPEED = 1e5;
+let solarStartedSim = false, solarPrevSpeed = null; // 自動開加速前滑桿的倍速
+function setSolar(on) {
+  if (on === solarOn()) return;
+  solar ??= new SolarSystem(canvas, earthUniforms.dayMap);
+  solar.setOn(on);
+  resize();
+  controls.enabled = !on && view === 'space';
+  document.body.classList.toggle('solar', on);
+  $('solar-toggle').setAttribute('aria-pressed', String(on));
+  if (on) {
+    setSimMax(SOLAR_MAX_SPEED);
+    if (!replay && (!sim || (spin && spinStartedSim && sim.speed === SPIN_SIM_SPEED))) {
+      solarPrevSpeed = speedFromSlider();
+      simSpeed.value = sliderFor(SOLAR_SIM_SPEED);
+      setSim(SOLAR_SIM_SPEED);
+      solarStartedSim = true;
+    }
+  } else {
+    const back = solarStartedSim && sim && !replay && sim.speed === SOLAR_SIM_SPEED;
+    solarStartedSim = false;
+    setSimMax(SIM_MAX_SPEED);
+    if (back) {
+      if (spin && spinStartedSim) { simSpeed.value = sliderFor(SPIN_SIM_SPEED); setSim(SPIN_SIM_SPEED); } else {
+        if (solarPrevSpeed !== null) simSpeed.value = sliderFor(solarPrevSpeed);
+        setSim(null);
+      }
+    }
+    for (const s of sats.values()) s.pathAt = -Infinity;
+    spinLast = null;
+    markPassesDirty();
+  }
+  updateHint();
+  tickSlow();
+}
+$('solar-toggle').addEventListener('click', () => setSolar(!solarOn()));
 
 // ---------- 回放 ----------
 // 用伺服器記錄的歷史資料（雲圖每 10 分鐘一張、保留 24 小時；星鏈 TLE 每 2.5 小時一份、保留 30 天），
@@ -1580,7 +1638,7 @@ function maxTilt(altKm) {
   return TILT_MAX * (1 - THREE.MathUtils.smoothstep(altKm, 3000, 8000));
 }
 canvas.addEventListener('pointerdown', (e) => {
-  if (view !== 'space' || !(e.button === 2 || (e.button === 0 && e.shiftKey))) return;
+  if (view !== 'space' || solarOn() || !(e.button === 2 || (e.button === 0 && e.shiftKey))) return;
   tiltDrag = { x: e.clientX, y: e.clientY, tilt, heading };
   controls.enabled = false; // 不要同時轉動地球
 });
@@ -1593,7 +1651,7 @@ window.addEventListener('pointermove', (e) => {
 window.addEventListener('pointerup', () => {
   if (!tiltDrag) return;
   tiltDrag = null;
-  controls.enabled = view === 'space';
+  controls.enabled = view === 'space' && !solarOn();
 });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
@@ -1648,6 +1706,12 @@ function adjustSpaceCamera() {
 
 function frame() {
   const ms = clockMs();
+  if (solarOn()) {
+    solar.update(ms);
+    renderer.render(solar.scene, solar.camera);
+    requestAnimationFrame(frame);
+    return;
+  }
   updateSun(ms);
   for (const s of sats.values()) updateSat(s, ms);
   starlink.update(ms, up, sim ? Math.max(1, sim.speed) : 1);
@@ -1743,6 +1807,7 @@ async function start() {
     try { on ||= localStorage.getItem(key) === '1'; } catch { /* optional */ }
     if (on) set(true);
   }
+  if (params.get('solar') === '1') setSolar(true);
   updateReplayButton();
 
   loadIds().forEach(createSat);
