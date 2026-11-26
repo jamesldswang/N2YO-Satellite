@@ -784,7 +784,41 @@ let savedSpacePos = null;
 const compassLabels = [];
 let taiwanLabel;
 
+// 鏡頭飛到 dir 方向（地心往外）正上方 altKm，朝正下方看；約 1.2 秒。拖曳或滾輪會中斷。
+let camFly = null;
+function flyTo(dir, altKm) {
+  if (solarOn()) setSolar(false);
+  if (view !== 'space') setView('space');
+  const from = camera.position.clone();
+  camFly = {
+    from: from.clone().normalize(), to: dir.clone().normalize(),
+    fromAlt: Math.max(from.length() - 1, 1e-6), toAlt: altKm / EARTH_KM,
+    t0: performance.now(), dur: 1200,
+  };
+  tilt = heading = 0;
+  controls.enableDamping = false; // 清掉拖曳的慣性，不然到了之後還會滑一下
+}
+const flyQ = new THREE.Quaternion(), flyQk = new THREE.Quaternion();
+function applyFly() {
+  if (!camFly) return;
+  const k = Math.min(1, (performance.now() - camFly.t0) / camFly.dur);
+  const e = k < 0.5 ? 4 * k * k * k : 1 - (-2 * k + 2) ** 3 / 2;
+  flyQ.setFromUnitVectors(camFly.from, camFly.to);
+  flyQk.identity().slerp(flyQ, e);
+  const la = Math.log(camFly.fromAlt), lb = Math.log(camFly.toAlt);
+  camera.position.copy(camFly.from).applyQuaternion(flyQk).setLength(1 + Math.exp(la + (lb - la) * e));
+  if (k >= 1) endFly();
+}
+function endFly() {
+  if (!camFly) return;
+  camFly = null;
+  controls.enableDamping = true;
+}
+canvas.addEventListener('pointerdown', endFly);
+canvas.addEventListener('wheel', endFly, { passive: true });
+
 function homeSpace() {
+  endFly();
   tilt = heading = 0;
   camera.position.copy(up).multiplyScalar(3.4);
   controls.target.set(0, 0, 0);
@@ -1208,13 +1242,15 @@ function renderCloudInfo() {
 }
 $('clouds-toggle').addEventListener('click', () => setClouds(!clouds.enabled));
 
-// 溫度／風圖層：氣象署測站即時觀測。和雲圖一樣只有即時資料，模擬時間差太多就調淡並註明。
+// 溫度／風圖層：氣象署測站觀測。回放（模擬到過去）時用伺服器收集的 weather-history；
+// 沒有那時候的資料、時間差太多就調淡並註明。
 const weather = new WeatherLayer(scene, camera, renderer);
 const WEATHER_KEY = 'weather-enabled';
 function setWeather(on) {
   if (on) weather.enable(); else weather.disable();
   $('weather-toggle').setAttribute('aria-pressed', String(on));
   $('weather-info').hidden = $('weather-legend').hidden = !on;
+  updateReplayButton();
   try { localStorage.setItem(WEATHER_KEY, on ? '1' : '0'); } catch { /* optional */ }
   renderWeatherInfo();
 }
@@ -1227,14 +1263,111 @@ function renderWeatherInfo() {
     stale = Math.abs(clockMs() - weather.obsTime.getTime()) > CLOUDS_STALE_MS;
     const { lo, hi, windy } = weather.summary();
     const range = lo ? ` · ${lo.temp.toFixed(1)}～${hi.temp.toFixed(1)}°C` : '';
-    const wind = windy ? ` · 最大風 ${windy.wspd.toFixed(1)} m/s（${windy.name}）` : '';
+    const wind = windy ? ` · 最大風 ${windy.wspd.toFixed(1)} m/s（${windy.county ? `${windy.county} ` : ''}${windy.name}站）` : '';
     text = stale ? `測站 ${hm} 的觀測，不隨模擬變化` : `測站 ${hm}${range}${wind}`;
   }
   weather.opacity = stale ? 0.3 : 1;
   $('weather-info').classList.toggle('stale', stale);
   if ($('weather-info').textContent !== text) $('weather-info').textContent = text;
 }
-$('weather-toggle').addEventListener('click', () => setWeather(!weather.enabled));
+$('weather-toggle').addEventListener('click', () => {
+  const on = !weather.enabled;
+  setWeather(on);
+  if (on) flyTo(up, WEATHER_HOME_KM); // 開啟時以台灣為中心、從 800 km 俯瞰全部測站
+});
+
+// 開著溫度／風時，點地球上的一個位置（或測站）→ 以那裡為中心飛到 WEATHER_CLICK_KM；
+// 已經比那更低就保持高度只移動中心，讓使用者自己繼續拉近。拖曳（移動超過 5 像素）不算點擊。
+const WEATHER_HOME_KM = 800, WEATHER_CLICK_KM = 80;
+const clickRay = new THREE.Raycaster();
+const clickNdc = new THREE.Vector2();
+const earthSphere = new THREE.Sphere(new THREE.Vector3(), 1);
+function earthPointAt(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  clickNdc.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+  clickRay.setFromCamera(clickNdc, camera);
+  return clickRay.ray.intersectSphere(earthSphere, new THREE.Vector3());
+}
+let weatherDown = null;
+canvas.addEventListener('pointerdown', (e) => {
+  weatherDown = e.button === 0 && !e.shiftKey ? { x: e.clientX, y: e.clientY } : null;
+});
+canvas.addEventListener('pointerup', (e) => {
+  const down = weatherDown;
+  weatherDown = null;
+  if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return;
+  if (!weather.enabled || view !== 'space' || solarOn()) return;
+  const st = weather.pick(e.clientX, e.clientY);
+  const target = st ? geoToVec(st.lat, st.lon, 0) : earthPointAt(e.clientX, e.clientY);
+  if (!target) return;
+  const altKm = (camera.position.length() - 1) * EARTH_KM;
+  flyTo(target, Math.min(altKm, WEATHER_CLICK_KM));
+});
+
+// 滑鼠停在測站上：顯示測站名稱和觀測資料
+const stationTip = document.createElement('div');
+stationTip.id = 'station-tip';
+stationTip.className = 'map-tip';
+stationTip.hidden = true;
+document.body.append(stationTip);
+const has = (v) => v !== null && v !== undefined;
+const fmtVal = (v, digits, unit) => (has(v) ? `${v.toFixed(digits)}${unit}` : null);
+function showStationTip(st, x, y) {
+  const head = document.createElement('div');
+  head.className = 'tip-head';
+  const title = document.createElement('strong');
+  title.textContent = st.name ? `${st.name}站` : st.id;
+  head.append(title);
+  if (st.county) {
+    const county = document.createElement('span');
+    county.className = 'tip-kind';
+    county.textContent = st.county;
+    head.append(county);
+  }
+  const lines = [];
+  const temp = fmtVal(st.temp, 1, '°C'), hum = fmtVal(st.hum, 0, '%');
+  if (temp || hum) lines.push([temp && `氣溫 ${temp}`, hum && `濕度 ${hum}`].filter(Boolean).join('　'));
+  if (has(st.wspd)) {
+    const from = has(st.wdir) && st.wspd > 0 ? `${compassName(st.wdir)}風（從 ${Math.round(st.wdir)}° 吹來）` : '無風';
+    const gust = fmtVal(st.gust, 1, ' m/s');
+    lines.push(`${from} ${st.wspd.toFixed(1)} m/s${gust ? `，陣風 ${gust}` : ''}`);
+  }
+  const pres = fmtVal(st.pres, 1, ' hPa'), rain = fmtVal(st.rain, 1, ' mm');
+  if (pres || rain) lines.push([pres && `氣壓 ${pres}`, rain && `今日雨量 ${rain}`].filter(Boolean).join('　'));
+  if (st.wx) lines.push(`天氣：${st.wx}`);
+  const body = lines.map((t) => { const el = document.createElement('p'); el.textContent = t; return el; });
+  const facts = document.createElement('div');
+  facts.className = 'tip-facts';
+  const when = st.t ? new Date(st.t).toLocaleString('zh-TW', {
+    timeZone: 'Asia/Taipei', hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  }) : null;
+  facts.textContent = [when && `觀測 ${when}`, has(st.alt) && `海拔 ${Math.round(st.alt)} m`, `站號 ${st.id}`]
+    .filter(Boolean).join(' · ');
+  stationTip.replaceChildren(head, ...body, facts);
+  stationTip.hidden = false;
+  // 放在游標右下，超出畫面就翻到另一邊
+  const w = stationTip.offsetWidth, h = stationTip.offsetHeight;
+  stationTip.style.left = `${x + 16 + w > innerWidth ? x - 16 - w : x + 16}px`;
+  stationTip.style.top = `${Math.max(8, y + 16 + h > innerHeight ? y - 16 - h : y + 16)}px`;
+}
+let hoverStation = null, hoverXY = null, tipXY = null;
+canvas.addEventListener('pointermove', (e) => { hoverXY = e.buttons ? null : { x: e.clientX, y: e.clientY }; });
+canvas.addEventListener('pointerleave', () => { hoverXY = null; });
+// 每幀呼叫：鏡頭飛行、回放換時間時，游標下的測站和資料也會變，不能只在滑鼠移動時判斷
+function updateStationTip() {
+  const st = hoverXY && weather.enabled && view === 'space' && !solarOn() ? weather.pick(hoverXY.x, hoverXY.y) : null;
+  const cursor = st ? 'pointer' : '';
+  if (canvas.style.cursor !== cursor) canvas.style.cursor = cursor;
+  if (!st) {
+    if (hoverStation) { stationTip.hidden = true; hoverStation = null; }
+    return;
+  }
+  if (st !== hoverStation || tipXY !== hoverXY) {
+    hoverStation = st;
+    tipXY = hoverXY;
+    showStationTip(st, hoverXY.x, hoverXY.y);
+  }
+}
 
 // 經緯線：每 15° 一條虛線，赤道和本初子午線較亮。半徑比雲球（1.006）高一點，開雲圖時也看得到；
 // 有深度測試，地球背面的線會被擋住。預設關閉，開關記在這個瀏覽器。
@@ -1512,11 +1645,11 @@ $('solar-toggle').addEventListener('click', () => setSolar(!solarOn()));
 // ---------- 回放 ----------
 // 用伺服器記錄的歷史資料（雲圖每 10 分鐘一張、保留 24 小時；星鏈 TLE 每 2.5 小時一份、保留 30 天），
 // 把時鐘撥回過去播放。只回放有開啟的圖層；追蹤清單的衛星用 SGP4 往回推算。
-let archive = { starlink: [], clouds: [] }; // [{ t, file }]，舊到新
+let archive = { starlink: [], clouds: [], weather: [] }; // [{ t, file }]，舊到新（weather 是每天一份）
 let historyAt = 0;
 async function loadHistory() {
   try {
-    archive = await api('/api/history');
+    archive = { weather: [], ...(await api('/api/history')) };
     historyAt = Date.now();
   } catch (err) {
     console.warn('讀取歷史資料清單失敗', err);
@@ -1528,6 +1661,7 @@ let starlinkWant;
 function applyHistory() {
   const ms = clockMs();
   clouds.showAt(ms, archive.clouds, Boolean(sim));
+  weather.showAt(ms, archive.weather, Boolean(sim));
   if (!starlink.enabled || !starlink.worker) return;
   const list = archive.starlink;
   let want = null;
@@ -1543,9 +1677,9 @@ let replayDragging = false;
 const replayPos = $('replay-pos'), replayPlay = $('replay-play'), replaySpeed = $('replay-speed');
 
 function updateReplayButton() {
-  const any = clouds.enabled || starlink.enabled;
+  const any = clouds.enabled || starlink.enabled || weather.enabled;
   $('replay-toggle').disabled = !any;
-  $('replay-toggle').title = any ? '用伺服器記錄的歷史資料，回放有開啟的圖層（衛星雲圖、星鏈）' : '先開啟衛星雲圖或星鏈';
+  $('replay-toggle').title = any ? '用伺服器記錄的歷史資料，回放有開啟的圖層（衛星雲圖、星鏈、溫度／風）' : '先開啟衛星雲圖、星鏈或溫度／風';
 }
 
 function fmtTaipei(ms) {
@@ -1559,16 +1693,19 @@ function showReplayBar(on) {
   document.body.classList.toggle('replaying', on);
 }
 
+const WEATHER_REPLAY_MS = 24 * 3600e3;
 async function startReplay() {
   await loadHistory();
   const starts = [];
   if (clouds.enabled && archive.clouds.length) starts.push(archive.clouds[0].t);
   if (starlink.enabled && archive.starlink.length) starts.push(archive.starlink[0].t);
+  // 測站資料預設永久保留，只回放最近 24 小時（和雲圖一樣）
+  if (weather.enabled && archive.weather.length) starts.push(Math.max(archive.weather[0].t, Date.now() - WEATHER_REPLAY_MS));
   showReplayBar(true);
   if (!starts.length) {
     replay = null;
     replayPos.disabled = replayPlay.disabled = true;
-    $('replay-time').textContent = '還沒有歷史資料。伺服器開著時會自動累積：雲圖每 10 分鐘一張，星鏈每 2.5 小時一份。';
+    $('replay-time').textContent = '還沒有歷史資料。伺服器開著時會自動累積：雲圖每 10 分鐘一張，星鏈每 2.5 小時一份，測站每 10 分鐘一筆。';
     return;
   }
   // 從「每個有開的圖層都有歷史資料」的時刻開始：星鏈備份通常比雲圖早一天以上，
@@ -1717,6 +1854,7 @@ function frame() {
   starlink.update(ms, up, sim ? Math.max(1, sim.speed) : 1);
   applySpin(ms);
   if (view === 'space') {
+    applyFly();
     adjustSpaceCamera();
     controls.update();
     applyTilt();
@@ -1724,6 +1862,7 @@ function frame() {
   } else aimSky();
   weather.update(view === 'space' && !hiddenByEarth(up.clone().multiplyScalar(1.001)));
   renderAltitude();
+  updateStationTip();
   starlink.updateModels(camera, canvas.clientHeight, earthUniforms.sunDir.value);
   sunMoon.update(ms, earthUniforms.sunDir.value, camera, canvas.clientHeight, view === 'sky');
   // 背景星空跟著鏡頭走、放在遠裁切面附近：拉遠時鏡頭才不會跑出星空球、星星跑到地球前面

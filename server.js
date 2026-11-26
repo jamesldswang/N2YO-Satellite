@@ -338,13 +338,107 @@ async function getWeather() {
       if (lat === null || lon === null || !Number.isFinite(t)) continue;
       const w = st.WeatherElement || {};
       obsTime = Math.max(obsTime, t);
+      const wx = String(w.Weather ?? '').trim();
       stations.push({
-        id: String(st.StationId), name: String(st.StationName || ''), lat, lon, t,
+        id: String(st.StationId), name: String(st.StationName || ''), county: String(st.GeoInfo?.CountyName || ''),
+        alt: num(st.GeoInfo?.StationAltitude), lat, lon, t,
         temp: num(w.AirTemperature), wdir: num(w.WindDirection), wspd: num(w.WindSpeed),
+        hum: num(w.RelativeHumidity), pres: num(w.AirPressure), gust: num(w.GustInfo?.PeakGustSpeed),
+        rain: num(w.Now?.Precipitation), wx: wx && !/^-9{2,}/.test(wx) ? wx : '',
       });
     }
     return { obsTime, stations };
   });
+}
+
+// 溫度／風回放：collector.js 每天一個 weather-history/<台灣日期>.csv（前幾天是 .csv.gz）。
+// 整天一次回傳：測站清單 + 每個觀測時刻一格，v 是 WEATHER_FIELDS × 測站數（依 stations 的順序，缺測 null）。
+// 一天 144 格 × 約 360 站，gzip 後約 0.5 MB。
+const WEATHER_HISTORY_DIR = path.join(CACHE_DIR, 'weather-history');
+const WEATHER_DAY = /^(\d{4}-\d{2}-\d{2})\.csv(?:\.gz)?$/;
+const WEATHER_TODAY_TTL = 5 * 60e3; // 今天的檔案還在寫
+const WEATHER_DAYS_CACHED = 4;
+const weatherDays = new Map();
+// 欄位名稱和 /api/weather 的測站物件一樣，前端直接套用
+const WEATHER_FIELDS = [
+  ['temp', 'temp_c'], ['wdir', 'wind_dir_deg'], ['wspd', 'wind_speed_ms'], ['hum', 'humidity_pct'],
+  ['pres', 'pressure_hpa'], ['gust', 'gust_ms'], ['rain', 'precip_mm'],
+]; // 日期 -> { json(gzip Buffer), expires }
+
+function listWeatherDays() {
+  try {
+    const days = new Set();
+    for (const name of fs.readdirSync(WEATHER_HISTORY_DIR)) {
+      const m = name.match(WEATHER_DAY);
+      if (m) days.add(m[1]);
+    }
+    // t 是那天台灣時間 00:00
+    return [...days].sort().map((day) => ({ t: Date.parse(`${day}T00:00:00+08:00`), file: day }));
+  } catch {
+    return [];
+  }
+}
+
+// 簡單的 CSV 解析（collector.js 只在有逗號、引號、換行時加引號）
+function parseCsvLine(line) {
+  if (!line.includes('"')) return line.split(',');
+  const out = [];
+  let cur = '', quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quoted) {
+      if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; } else if (ch === '"') quoted = false; else cur += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ',') { out.push(cur); cur = ''; } else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+function readWeatherDay(day) {
+  const base = path.join(WEATHER_HISTORY_DIR, `${day}.csv`);
+  let text;
+  try { text = zlib.gunzipSync(fs.readFileSync(`${base}.gz`)).toString('utf8'); } catch {
+    try { text = fs.readFileSync(base, 'utf8'); } catch { return null; }
+  }
+  const lines = text.replace(/^﻿/, '').split(/\r?\n/);
+  const col = Object.fromEntries(parseCsvLine(lines[0]).map((name, i) => [name, i]));
+  const num = (s) => { if (s === undefined || s === '') return null; const n = Number(s); return Number.isFinite(n) && n > -90 ? n : null; };
+  const stations = [], index = new Map(), byTime = new Map();
+  for (const line of lines.slice(1)) {
+    if (!line) continue;
+    const c = parseCsvLine(line);
+    const t = Date.parse(c[col.obs_time]);
+    const id = c[col.station_id];
+    const lat = num(c[col.lat]), lon = num(c[col.lon]);
+    if (!Number.isFinite(t) || !id || lat === null || lon === null) continue;
+    if (!index.has(id)) {
+      index.set(id, stations.length);
+      stations.push({ id, name: c[col.station_name] || '', county: c[col.county] || '', alt: num(c[col.alt_m]), lat, lon });
+    }
+    if (!byTime.has(t)) byTime.set(t, new Map());
+    byTime.get(t).set(index.get(id), WEATHER_FIELDS.map(([, name]) => num(c[col[name]])));
+  }
+  const n = WEATHER_FIELDS.length;
+  const frames = [...byTime.keys()].sort((a, b) => a - b).map((t) => {
+    const v = new Array(stations.length * n).fill(null);
+    for (const [i, vals] of byTime.get(t)) v.splice(i * n, n, ...vals);
+    return { t, v };
+  });
+  return { day, fields: WEATHER_FIELDS.map(([key]) => key), stations, frames };
+}
+
+function getWeatherDay(day) {
+  const hit = weatherDays.get(day);
+  if (hit && Date.now() < hit.expires) return hit.body;
+  const data = readWeatherDay(day);
+  if (!data) return null;
+  const body = zlib.gzipSync(JSON.stringify(data));
+  const today = !fs.existsSync(path.join(WEATHER_HISTORY_DIR, `${day}.csv.gz`));
+  weatherDays.delete(day);
+  weatherDays.set(day, { body, expires: today ? Date.now() + WEATHER_TODAY_TTL : Infinity });
+  while (weatherDays.size > WEATHER_DAYS_CACHED) weatherDays.delete(weatherDays.keys().next().value);
+  return body;
 }
 
 async function getClouds() {
@@ -472,7 +566,16 @@ const server = http.createServer(async (req, res) => {
     sendJson(res, 200, {
       starlink: listHistory(HISTORY_DIR, '.tle.gz'),
       clouds: listHistory(CLOUDS_HISTORY_DIR, '.jpg'),
+      weather: listWeatherDays(),
     });
+    return;
+  }
+  const weatherMatch = pathname.match(/^\/api\/weather\/history\/(\d{4}-\d{2}-\d{2})$/);
+  if (weatherMatch) {
+    const body = getWeatherDay(weatherMatch[1]);
+    if (!body) { sendJson(res, 404, { error: '找不到這天的測站資料' }); return; }
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Encoding': 'gzip', 'Cache-Control': 'no-store' });
+    res.end(body);
     return;
   }
   const histMatch = pathname.match(/^\/api\/(starlink|clouds)\/history\/([^/]+)$/);

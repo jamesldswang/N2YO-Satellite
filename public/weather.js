@@ -33,6 +33,9 @@ export class WeatherLayer {
     this.status = '';
     this.obsTime = null;      // Date
     this.stations = [];
+    this.live = null;         // { stations, obsTime } 即時觀測
+    this.shown = null;        // 目前畫的那一組（live 或某一格歷史）
+    this.days = new Map();    // 日期 -> { stations, frames } | 'loading' | 'failed'（回放用）
     this.opacity = 1;         // 外部設定（資料太舊時調淡）
     this.timer = 0;
     this.arrowScale = 0;      // 目前箭頭用的「每 m/s 幾公里」，差太多才重建
@@ -66,6 +69,7 @@ export class WeatherLayer {
     this.enabled = false;
     clearInterval(this.timer);
     this.group.visible = false;
+    this.days.clear();
   }
 
   async load() {
@@ -74,13 +78,84 @@ export class WeatherLayer {
       const res = await fetch('/api/weather');
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      this.stations = data.stations;
-      this.obsTime = data.obsTime ? new Date(data.obsTime) : null;
+      const wasLive = !this.shown || this.shown === this.live;
+      this.live = { stations: data.stations, obsTime: data.obsTime ? new Date(data.obsTime) : null };
       this.status = '';
-      this.build();
+      if (wasLive) this.display(this.live);
     } catch (err) {
       if (!this.stations.length) this.status = `測站資料讀取失敗：${err.message}`;
     }
+  }
+
+  display(entry) {
+    if (entry === this.shown) return;
+    this.shown = entry;
+    this.stations = entry.stations;
+    this.obsTime = entry.obsTime;
+    this.build();
+  }
+
+  // 回放：tickSlow 呼叫。days = /api/history 的 weather（[{ t: 台灣 00:00, file: 日期 }]）。
+  // 模擬到過去時畫 t ≤ ms 的最後一格歷史觀測；即時、或比即時觀測還晚就畫即時資料。
+  showAt(ms, days, simulating) {
+    if (!this.enabled) return;
+    const liveT = this.live?.obsTime?.getTime() ?? Infinity;
+    if (!simulating || !days.length || ms >= liveT) { if (this.live) this.display(this.live); return; }
+    const day = taipeiDate(ms);
+    const want = [day, taipeiDate(ms - 86400e3)]; // 剛過午夜時，最後一格在前一天
+    for (const d of want) if (days.some((x) => x.file === d)) this.loadDay(d);
+    let best = null;
+    for (const d of want) {
+      const data = this.days.get(d);
+      if (!data || typeof data === 'string') continue;
+      for (const f of data.frames) {
+        if (f.t > ms) break;
+        if (!best || f.t > best.f.t) best = { f, data };
+      }
+      if (best) break; // 當天有就不用看前一天
+    }
+    if (!best) {
+      // 還沒載入或那段時間沒資料：比最早的資料還早就用最早一格（app.js 會調淡註明）
+      const first = this.days.get(days[0].file);
+      if (first && typeof first !== 'string' && first.frames.length && ms < first.frames[0].t) {
+        best = { f: first.frames[0], data: first };
+      }
+    }
+    if (best) this.display(frameEntry(best.data, best.f));
+  }
+
+  async loadDay(day) {
+    if (this.days.has(day)) return;
+    this.days.set(day, 'loading');
+    try {
+      const res = await fetch(`/api/weather/history/${day}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (!this.enabled) return;
+      data.entries = new Map(); // 每格只建一次，display() 才能用 === 判斷有沒有換
+      this.days.set(day, data);
+      while (this.days.size > 3) this.days.delete(this.days.keys().next().value);
+    } catch (err) {
+      console.warn(`讀取 ${day} 的測站資料失敗`, err);
+      if (this.enabled) this.days.set(day, 'failed');
+    }
+  }
+
+  // 滑鼠位置（client 座標）最近的測站，要在點的半徑 + 4 像素內；圖層沒顯示時回傳 null
+  pick(clientX, clientY) {
+    if (!this.group.visible || !this.stations.length) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const r = this.pointMat.size / 2 + 4;
+    const v = new THREE.Vector3();
+    let best = null;
+    for (const s of this.stations) {
+      if (s.temp === null && s.wspd === null) continue;
+      geoToVec(s.lat, s.lon, ALT_KM, v).project(this.camera);
+      if (v.z > 1) continue;
+      const d = Math.hypot(rect.left + ((v.x + 1) / 2) * rect.width - clientX, rect.top + ((1 - v.y) / 2) * rect.height - clientY);
+      if (d <= r && (!best || d < best.d)) best = { s, d };
+    }
+    return best?.s ?? null;
   }
 
   // 依溫度、風速統計，給資訊列用
@@ -180,6 +255,28 @@ export class WeatherLayer {
     }
     arr.needsUpdate = true;
   }
+}
+
+// 台灣日期（UTC+8），和 collector.js 的檔名一樣
+function taipeiDate(ms) {
+  return new Date(ms + 8 * 3600e3).toISOString().slice(0, 10);
+}
+
+// 一格歷史觀測 → 和即時資料一樣的 { stations, obsTime }
+function frameEntry(data, f) {
+  let e = data.entries.get(f.t);
+  if (!e) {
+    const fields = data.fields || ['temp', 'wdir', 'wspd'];
+    const n = fields.length;
+    const stations = data.stations.map((s, i) => {
+      const st = { ...s, t: f.t };
+      fields.forEach((k, j) => { st[k] = f.v[i * n + j]; });
+      return st;
+    }).filter((s) => s.temp !== null || s.wspd !== null);
+    e = { stations, obsTime: new Date(f.t) };
+    data.entries.set(f.t, e);
+  }
+  return e;
 }
 
 // 圓點貼圖（有深色外框，在亮的地面上也看得清楚）
