@@ -17,6 +17,9 @@ description: 修改、測試「台灣上空衛星」網頁（D:\Personal_Git\sat
 | `public/starlink.js` | 星鏈圖層 `StarlinkLayer`（ES module）：`enable()`、`disable()`、每幀 `update(ms, up, fast)`、`updateModels(camera, viewPx, sunDir)`。Points 一個 draw call 畫上萬顆；離鏡頭最近的 `MODEL_MAX` 顆另外畫 3D 模型（`makeSatModel('starlink')`，重複使用），畫面大小 = `MODEL_PX × MODEL_REF_KM ÷ 距離`，小於 `MODEL_MIN_PX` 就不畫 |
 | `public/starlink-worker.js` | Web Worker：解析整份星鏈 TLE，`tick` 時算出全部的場景座標位置和速度（Float32Array，用 transfer 傳回） |
 | `public/clouds.js` | 衛星雲圖圖層 `CloudLayer`（ES module）：`enable()`、`disable()`、`load()`；`status`、`obsTime`。比地球大一點的球，shader 用靜止衛星公式取樣 |
+| `public/tail.js` | 彗星尾巴：`makeTail(color)`、`setTailPoints(mesh, pts)`（`TAIL_POINTS` 個點，[0] 是頭）、`disposeTail()`、`tailResolution`（resize 時用 `renderer.getDrawingBufferSize` 更新）。頂點 shader 把每點往螢幕法線推開 `widthPx`（畫布實際像素，app.js 乘 `getPixelRatio()`），加法混色。**一定要 `side: DoubleSide`**，帶子在螢幕上的繞向不固定，否則整條被背面剔除、看不到。app.js 的 `updateTail()`（updateSat 每幀呼叫）用 SGP4 算過去 `TAIL_FRACTION`（週期的 10%）的點，整條平移到 `s.pos` 接上頭；週期 > 1300 分鐘不畫 |
+| `public/sat-info.js` | 追蹤清單 hover 簡介：`satInfo(s)` → `{ title, kind, text, facts }`。先查 `BY_ID`（NORAD 編號），再比 `BY_NAME`（名稱正規表示式，順序有意義，例如 FORMOSAT-7 要在 FORMOSAT 前面），都沒有就用軌道高度（`orbitText()`）。app.js 的 `showSatTip()`／`hideSatTip()`，`#sat-tip` 是 `position: fixed`，放在 `#panel` 左邊。`CATALOG`（BY_ID 的 id、name、kind）給「加入」下拉選單：app.js 的 `renderAddMenu()`、`setMenuIndex()`、`addSat(id)`；選項 `mousedown` 要 preventDefault，不然輸入框 blur 會先把選單關掉。BY_ID 新增衛星要寫 `en`（英文名稱，選單顯示、`initialName(id)` 給剛加入還沒拿到 N2YO 名稱的衛星用）和 `name`（中文，只用來搜尋）。選單不顯示 NORAD 編號 |
+| `public/weather.js` | 溫度／風圖層 `WeatherLayer`（ES module）：`enable()`、`disable()`、每幀 `update(visible)`、`summary()`。資料來自 `server.js` 的 `/api/weather`（氣象署 O-A0003-001，快取 3 分鐘，缺測變 null）。Points 依溫度上色 + LineSegments 箭頭往下風處；固定像素大小，每像素 3→6 km 淡出。app.js 的 `setWeather()`、`renderWeatherInfo()`，localStorage `weather-enabled`、網址 `?weather=1` |
 | `public/taiwan-tiles.js` | 台灣高解析影像 `TaiwanTiles`（ES module）：四分樹圖塊 LOD，每幀 `update()`、`hideAll()`。範圍等設定來自 `/api/config` 的 `twTiles` |
 | `public/textures/` | `earth_bluemarble_5400.jpg`（日間地球貼圖）、`taiwan-sea-mask.png`（台灣外海遮罩，由 `tools/make-sea-mask.py` 產生） |
 | `public/passes.js` | 過境預報演算法 `SatPasses.compute()`。一般 script（不是 module），掛在全域，**Web Worker 和 `tools/check-passes.js` 共用**，所以不能用 DOM、不能用 import |
@@ -115,6 +118,7 @@ description: 修改、測試「台灣上空衛星」網頁（D:\Personal_Git\sat
   - `server.listen` 成功後才 `startCollector(CACHE_DIR)`（重複啟動時第二個會 EADDRINUSE 結束，不會兩個一起寫檔）。每 5 分鐘一次，不管網頁有沒有開。
   - 測站：氣象署 S3 `O-A0003-001.json`（約 360 站、每 10 分鐘，**不用授權碼**；O-A0001-001 自動站 876 站也在 S3）。寫 `weather-history/<台灣日期>.csv`（UTF-8 BOM），用 `站號|觀測時間` 去重（啟動時讀當天檔），過午夜 1 小時後把前一天壓成 `.csv.gz`。缺測值 -99 寫成空白。
   - 東亞雲圖：`O-B0032-003`（1200 px 紅外線黑白，約 380 KB），觀測時間是 `CLOUDS_ARCHIVE_EVERY_MIN`（預設 60）的倍數才存，`clouds-eastasia/<UTC 年-月>/<stamp>Z.jpg`。Node 沒有 JPEG 解碼器，所以存原檔、不在伺服器上算雲量。
+  - 東亞雲圖氣象署延遲 15–25 分鐘、偶爾跳過整點，所以每個間隔存「前半段裡最早拿到的一張」（`cloudSlotSaved()` 掃目錄判斷），檔名是真正的觀測時間，不一定是整點。
   - 預設永久保留；`WEATHER_KEEP_DAYS`、`CLOUDS_ARCHIVE_KEEP_DAYS`、`COLLECT=0`。
   - 測試：`DATA_DIR` 指到 scratchpad、另開 `PORT`，啟動兩次確認不會重複寫；注意 `migrateOldCache()` 會把專案的 `.cache/` 複製進測試資料夾，測完整個刪掉。
   - 開機自動啟動：`autostart.cmd on|off`（在 Startup 資料夾建 `SatelliteTracker.lnk` → `wscript start.vbs /background`）。**Claude 不能自己執行 `on`**（會被權限擋，屬於常駐），要請使用者自己跑；測試時把腳本複製到 scratchpad、把 LNK 改成 scratchpad 路徑。
@@ -137,6 +141,7 @@ description: 修改、測試「台灣上空衛星」網頁（D:\Personal_Git\sat
 - **位置**：`sampleAt()`、`stateFromSamples(s, sec)`（即時）、`stateFromTle(s, ms)`（模擬）、`updateSat(s, ms)`（每幀）。`s.state = { alt, lat, lng, az, el }`，`s.pos` 是場景座標。
 - **軌道線**：`updatePath(s, ms)`。
 - **清單**：`makeRow(s)`、`refreshList()`（依仰角排序）、`select(id)`、`renderCount()`。
+- **地球自轉**（`spin`、`setSpin(on)`、`applySpin(ms)`，localStorage `spin-enabled`、`?spin=1`）：場景仍然是地球固定座標，只是 frame() 每幀依 GMST 的變化 d，把太空俯瞰的鏡頭和 `stars` 繞 +Y 轉 −d（不是轉地球，所以台灣、圖塊、雲、測站等全部不用改）。一幀時間跳超過 `SPIN_JUMP_MS`（10 分鐘）就不轉鏡頭。軌道線在 spin 時全部點用 `gmstNow` 換算（閉合橢圓），記在 `s.pathGmst`，之後每幀 `s.path.rotation.y = −(gmst − pathGmst)`；尾巴的 `sgp4Point(…, gmst)` 也用現在的 GMST。`let spin` 宣告在檔案前面（`let view` 旁邊），因為 updatePath／updateTail 比 setSpin 早定義。
 - **視角**：`setView('space' | 'sky')`、`homeSpace()`、`aimSky()`、`skyDirection(az, el)`、`updateHint()`。
 - **斜看（太空俯瞰）**：`tilt`、`heading`（弧度），右鍵或 Shift＋左鍵拖曳時改（拖曳中 `controls.enabled = false`）。`frame()` 在 `controls.update()` 之後呼叫 `applyTilt()`（OrbitControls 每次 update 都會 lookAt 地心，所以每幀重轉；`rotateZ(heading)` 再 `rotateX(tilt)`），`maxTilt(altKm)` 在 3000–8000 km 漸漸變 0。左下角 `#altitude` 由 `renderAltitude()` 每幀更新。
 - **模型**：`placeModel(s, selected)`、`modelKind()`、`makeSatModel()`；TLE 載入後若判斷出的種類不同（例如新加的是同步衛星）會換模型。

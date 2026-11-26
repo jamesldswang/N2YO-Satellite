@@ -7,6 +7,9 @@ import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { makeSatModel, modelKind, setModelLit, disposeModel } from './models.js';
 import { StarlinkLayer } from './starlink.js';
 import { CloudLayer } from './clouds.js';
+import { WeatherLayer } from './weather.js';
+import { satInfo, CATALOG, initialName } from './sat-info.js';
+import { makeTail, setTailPoints, disposeTail, tailResolution, TAIL_POINTS } from './tail.js';
 import { TaiwanTiles } from './taiwan-tiles.js';
 
 const sgp4 = window.satellite;
@@ -235,6 +238,7 @@ const RING_MIN_PX = 16;
 const sats = new Map();
 let selectedId = null;
 let view = 'space';
+let spin = false; // 地球自轉模式（見 setSpin）
 let polling = false;
 
 function makeLabel(className, text) {
@@ -272,15 +276,17 @@ function createSat(id) {
   link.frustumCulled = false;
   link.visible = false;
 
-  scene.add(sprite, model, path, link);
+  const tail = makeTail(color);
 
-  const label = makeLabel('', `#${id}`);
+  scene.add(sprite, model, path, link, tail);
+
+  const label = makeLabel('', initialName(id));
   label.addEventListener('click', () => select(id));
 
   const s = {
-    id, colorIndex, color, sprite, model, path, link, label,
+    id, colorIndex, color, sprite, model, path, link, tail, label,
     lastPos: new THREE.Vector3(), forward: new THREE.Vector3(),
-    name: `#${id}`, samples: [], satrec: null, state: null, error: null,
+    name: initialName(id), samples: [], satrec: null, state: null, error: null,
     busy: false, nextFetch: 0, nextTle: 0, pathAt: -Infinity, row: null,
     pos: new THREE.Vector3(),
   };
@@ -291,13 +297,15 @@ function createSat(id) {
 }
 
 function removeSat(s) {
-  scene.remove(s.sprite, s.model, s.path, s.link);
+  scene.remove(s.sprite, s.model, s.path, s.link, s.tail);
+  disposeTail(s.tail);
   s.sprite.material.dispose();
   disposeModel(s.model);
   s.path.geometry.dispose(); s.path.material.dispose();
   s.link.geometry.dispose(); s.link.material.dispose();
   s.label.remove();
   s.row.el.remove();
+  hideSatTip(); // 按 × 移除時游標還在列上，mouseleave 不會觸發
   sats.delete(s.id);
   markPassesDirty();
   if (selectedId === s.id) select(null);
@@ -418,11 +426,12 @@ function stateFromTle(s, ms) {
 function updateSat(s, ms) {
   s.state = sim ? stateFromTle(s, ms) : stateFromSamples(s, ms / 1000);
   if (!s.state) {
-    s.sprite.visible = s.model.visible = s.link.visible = false;
+    s.sprite.visible = s.model.visible = s.link.visible = s.tail.visible = false;
     return;
   }
 
   const selected = s.id === selectedId;
+  updateTail(s, ms, selected);
   const modelPx = placeModel(s, selected);
   s.sprite.position.copy(s.pos);
   // sizeAttenuation:false sprites are scaled in fractions of the viewport height.
@@ -438,6 +447,38 @@ function updateSat(s, ms) {
     p.setXYZ(1, s.pos.x, s.pos.y, s.pos.z);
     p.needsUpdate = true;
   }
+}
+
+// 彗星尾巴（tail.js）：剛飛過的那段軌跡，長度 = 軌道週期的 TAIL_FRACTION。
+// 點用 SGP4 算，整條平移到衛星目前顯示的位置（即時模式的位置來自 N2YO，和 SGP4 差幾公里），頭才接得上。
+// 同步衛星在地球固定座標裡幾乎不動，尾巴只會是一團光，不畫。
+const TAIL_FRACTION = 0.1;
+const tailPts = Array.from({ length: TAIL_POINTS }, () => new THREE.Vector3());
+const tailShift = new THREE.Vector3();
+function sgp4Point(s, ms, out, gmst) {
+  const date = new Date(ms);
+  const pv = sgp4.propagate(s.satrec, date);
+  if (!pv || !pv.position) return false;
+  const g = sgp4.eciToGeodetic(pv.position, gmst ?? sgp4.gstime(date));
+  geoToVec(g.latitude / DEG, g.longitude / DEG, g.height, out);
+  return true;
+}
+function updateTail(s, ms, selected) {
+  const periodMin = s.satrec ? (2 * Math.PI) / s.satrec.no : Infinity;
+  s.tail.visible = false;
+  if (periodMin > 1300 || !sgp4Point(s, ms, tailShift)) return;
+  tailShift.subVectors(s.pos, tailShift);
+  const span = periodMin * 60000 * TAIL_FRACTION;
+  const gmst = spin ? sgp4.gstime(new Date(ms)) : undefined; // 地球自轉模式：尾巴也畫在太空座標
+  for (let i = 0; i < TAIL_POINTS; i++) {
+    if (!sgp4Point(s, ms - (span * i) / (TAIL_POINTS - 1), tailPts[i], gmst)) return;
+    tailPts[i].add(tailShift);
+  }
+  setTailPoints(s.tail, tailPts);
+  const u = s.tail.material.uniforms;
+  u.opacity.value = selected ? 1 : 0.8;
+  u.widthPx.value = (selected ? 20 : 15) * renderer.getPixelRatio(); // shader 用畫布實際像素
+  s.tail.visible = true;
 }
 
 // Orient the model like a real satellite (bottom toward Earth, nose along its
@@ -482,13 +523,18 @@ function updatePath(s, nowMs) {
   const start = -0.15 * period, span = 1.15 * period;
   const pos = s.path.geometry.attributes.position;
   const col = s.path.geometry.attributes.color;
+  // 地球自轉模式：全部的點都用「現在」的地球角度換算，畫出來是太空中閉合的軌道橢圓；
+  // 之後每幀由 applySpin() 依地球多轉的角度旋轉整條線
+  const gmstNow = spin ? sgp4.gstime(new Date(nowMs)) : null;
+  s.pathGmst = gmstNow;
+  s.path.rotation.y = 0;
   let n = 0;
   for (let i = 0; i < PATH_POINTS; i++) {
     const offset = start + (span * i) / (PATH_POINTS - 1);
     const date = new Date(nowMs + offset * 60000);
     const pv = sgp4.propagate(s.satrec, date);
     if (!pv || !pv.position) continue;
-    const g = sgp4.eciToGeodetic(pv.position, sgp4.gstime(date));
+    const g = sgp4.eciToGeodetic(pv.position, gmstNow ?? sgp4.gstime(date));
     geoToVec(g.latitude / DEG, g.longitude / DEG, g.height, pathPoint);
     pos.setXYZ(n, pathPoint.x, pathPoint.y, pathPoint.z);
     const fade = offset < 0 ? 0.55 * (1 + offset / (0.15 * period)) + 0.1 : 0.75 - 0.55 * (offset / period);
@@ -525,9 +571,47 @@ function makeRow(s) {
   el.append(dot, name, elev, remove, sub);
   el.addEventListener('click', () => select(s.id));
   el.addEventListener('keydown', (e) => { if (e.key === 'Enter') select(s.id); });
+  el.addEventListener('mouseenter', () => showSatTip(s, el));
+  el.addEventListener('focus', () => showSatTip(s, el));
+  el.addEventListener('mouseleave', hideSatTip);
+  el.addEventListener('blur', hideSatTip);
   $('list').append(el);
   return { el, name, elev, sub };
 }
+
+// 滑鼠移到清單上的衛星時，在清單左邊顯示簡介（sat-info.js）
+const satTip = document.createElement('div');
+satTip.id = 'sat-tip';
+satTip.setAttribute('role', 'tooltip');
+satTip.hidden = true;
+document.body.append(satTip);
+function showSatTip(s, rowEl) {
+  const info = satInfo(s);
+  const head = document.createElement('div');
+  head.className = 'tip-head';
+  const title = document.createElement('strong');
+  title.textContent = info.title || `NORAD ${s.id}`;
+  head.append(title);
+  if (info.kind) {
+    const kind = document.createElement('span');
+    kind.className = 'tip-kind';
+    kind.textContent = info.kind;
+    head.append(kind);
+  }
+  const text = document.createElement('p');
+  text.textContent = info.text;
+  const facts = document.createElement('div');
+  facts.className = 'tip-facts';
+  facts.textContent = [`NORAD ${s.id}`, ...info.facts].join(' · ');
+  satTip.replaceChildren(head, text, facts);
+  satTip.hidden = false;
+  const row = rowEl.getBoundingClientRect();
+  const panel = $('panel').getBoundingClientRect();
+  const h = satTip.offsetHeight;
+  satTip.style.left = `${Math.max(8, panel.left - satTip.offsetWidth - 10)}px`;
+  satTip.style.top = `${Math.min(Math.max(8, row.top), innerHeight - h - 8)}px`;
+}
+function hideSatTip() { satTip.hidden = true; }
 
 function refreshList() {
   const elOf = (s) => (s.state ? s.state.el : -999);
@@ -591,22 +675,103 @@ function loadIds() {
   return DEFAULT_IDS;
 }
 
-$('add').addEventListener('submit', (e) => {
-  e.preventDefault();
-  const input = $('add-id');
-  const id = Number(input.value);
+// 加入衛星：輸入 NORAD 編號，或從下拉選單選（sat-info.js 的 CATALOG 裡還沒追蹤的）
+const addInput = $('add-id');
+const addMenu = $('add-menu');
+let menuItems = [], menuIndex = -1;
+
+function addSat(id) {
   if (!Number.isInteger(id) || id <= 0 || sats.has(id) || sats.size >= MAX_SATS) {
-    input.setCustomValidity(sats.has(id) ? '已在清單中' : sats.size >= MAX_SATS ? `最多 ${MAX_SATS} 顆` : '請輸入 NORAD 編號');
-    input.reportValidity();
-    return;
+    addInput.setCustomValidity(sats.has(id) ? '已在清單中' : sats.size >= MAX_SATS ? `最多 ${MAX_SATS} 顆` : '請輸入 NORAD 編號，或從清單選一顆');
+    addInput.reportValidity();
+    return false;
   }
   createSat(id);
-  input.value = '';
+  addInput.value = '';
   saveIds();
   renderCount();
   poll();
+  return true;
+}
+
+function renderAddMenu() {
+  const q = addInput.value.trim().toLowerCase();
+  menuItems = CATALOG.filter((c) => !sats.has(c.id)
+    && (!q || String(c.id).startsWith(q) || c.en.toLowerCase().includes(q)
+      || c.name.toLowerCase().includes(q) || c.kind.includes(q)));
+  menuIndex = -1;
+  hideSatTip();
+  const rows = menuItems.map((c, i) => {
+    const li = document.createElement('li');
+    li.setAttribute('role', 'option');
+    li.id = `add-opt-${c.id}`;
+    const name = document.createElement('span');
+    name.className = 'menu-name';
+    name.textContent = c.en;
+    const meta = document.createElement('span');
+    meta.className = 'menu-meta';
+    meta.textContent = c.kind;
+    li.append(name, meta);
+    li.addEventListener('mousedown', (e) => e.preventDefault()); // 不要讓輸入框失去焦點
+    li.addEventListener('mouseenter', () => setMenuIndex(i, false));
+    li.addEventListener('click', () => { if (addSat(c.id)) renderAddMenu(); });
+    return li;
+  });
+  if (!rows.length) {
+    const li = document.createElement('li');
+    li.className = 'menu-empty';
+    li.textContent = /^\d+$/.test(q) ? `清單裡沒有，按「加入」直接追蹤 ${q}` : '沒有符合的衛星';
+    rows.push(li);
+  }
+  addMenu.replaceChildren(...rows);
+  addMenu.hidden = false;
+  addInput.setAttribute('aria-expanded', 'true');
+}
+
+function setMenuIndex(i, scroll = true) {
+  const lis = addMenu.querySelectorAll('[role=option]');
+  lis[menuIndex]?.classList.remove('active');
+  menuIndex = i;
+  const li = lis[i];
+  if (!li) { addInput.removeAttribute('aria-activedescendant'); hideSatTip(); return; }
+  li.classList.add('active');
+  addInput.setAttribute('aria-activedescendant', li.id);
+  if (scroll) li.scrollIntoView({ block: 'nearest' });
+  showSatTip({ id: menuItems[i].id }, li);
+}
+
+function closeAddMenu() {
+  addMenu.hidden = true;
+  addInput.setAttribute('aria-expanded', 'false');
+  addInput.removeAttribute('aria-activedescendant');
+  hideSatTip();
+}
+
+addInput.addEventListener('focus', renderAddMenu);
+addInput.addEventListener('click', () => { if (addMenu.hidden) renderAddMenu(); });
+addInput.addEventListener('blur', closeAddMenu);
+addInput.addEventListener('input', () => { addInput.setCustomValidity(''); renderAddMenu(); });
+addInput.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (addMenu.hidden) renderAddMenu();
+    if (!menuItems.length) return;
+    const step = e.key === 'ArrowDown' ? 1 : -1;
+    setMenuIndex((menuIndex + step + menuItems.length) % menuItems.length);
+  } else if (e.key === 'Escape') {
+    closeAddMenu();
+  } else if (e.key === 'Enter' && !addMenu.hidden && menuIndex >= 0) {
+    e.preventDefault();
+    if (addSat(menuItems[menuIndex].id)) renderAddMenu();
+  }
 });
-$('add-id').addEventListener('input', (e) => e.target.setCustomValidity(''));
+$('add').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const text = addInput.value.trim();
+  // 打的是名稱：用選單裡第一個符合的
+  const id = /^\d+$/.test(text) ? Number(text) : menuItems[0]?.id;
+  if (addSat(id)) renderAddMenu();
+});
 
 // Views
 const HOME_LOOK_EL = 28;
@@ -735,6 +900,7 @@ function resize() {
   const w = window.innerWidth, h = window.innerHeight;
   renderer.setSize(w, h, false);
   coastMaterial.resolution.set(w, h);
+  renderer.getDrawingBufferSize(tailResolution.value);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
 }
@@ -939,6 +1105,7 @@ function tickSlow() {
   applyHistory();
   renderStarlinkInfo();
   renderCloudInfo();
+  renderWeatherInfo();
 }
 
 // Starlink layer: off by default; the choice is remembered in this browser.
@@ -995,6 +1162,34 @@ function renderCloudInfo() {
   if ($('clouds-info').textContent !== text) $('clouds-info').textContent = text;
 }
 $('clouds-toggle').addEventListener('click', () => setClouds(!clouds.enabled));
+
+// 溫度／風圖層：氣象署測站即時觀測。和雲圖一樣只有即時資料，模擬時間差太多就調淡並註明。
+const weather = new WeatherLayer(scene, camera, renderer);
+const WEATHER_KEY = 'weather-enabled';
+function setWeather(on) {
+  if (on) weather.enable(); else weather.disable();
+  $('weather-toggle').setAttribute('aria-pressed', String(on));
+  $('weather-info').hidden = $('weather-legend').hidden = !on;
+  try { localStorage.setItem(WEATHER_KEY, on ? '1' : '0'); } catch { /* optional */ }
+  renderWeatherInfo();
+}
+function renderWeatherInfo() {
+  if (!weather.enabled) return;
+  let text = weather.status;
+  let stale = false;
+  if (!text && weather.obsTime) {
+    const hm = weather.obsTime.toLocaleTimeString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false, hour: '2-digit', minute: '2-digit' });
+    stale = Math.abs(clockMs() - weather.obsTime.getTime()) > CLOUDS_STALE_MS;
+    const { lo, hi, windy } = weather.summary();
+    const range = lo ? ` · ${lo.temp.toFixed(1)}～${hi.temp.toFixed(1)}°C` : '';
+    const wind = windy ? ` · 最大風 ${windy.wspd.toFixed(1)} m/s（${windy.name}）` : '';
+    text = stale ? `測站 ${hm} 的觀測，不隨模擬變化` : `測站 ${hm}${range}${wind}`;
+  }
+  weather.opacity = stale ? 0.3 : 1;
+  $('weather-info').classList.toggle('stale', stale);
+  if ($('weather-info').textContent !== text) $('weather-info').textContent = text;
+}
+$('weather-toggle').addEventListener('click', () => setWeather(!weather.enabled));
 
 // 經緯線：每 15° 一條虛線，赤道和本初子午線較亮。半徑比雲球（1.006）高一點，開雲圖時也看得到；
 // 有深度測試，地球背面的線會被擋住。預設關閉，開關記在這個瀏覽器。
@@ -1124,6 +1319,40 @@ function setGraticule(on) {
   try { localStorage.setItem(GRID_KEY, on ? '1' : '0'); } catch { /* optional */ }
 }
 $('grid-toggle').addEventListener('click', () => setGraticule(!graticule.visible));
+
+// 地球自轉：場景本來是「地球固定」（台灣永遠在同一個位置，衛星軌跡每圈往西偏）。
+// 開啟後改成太空固定的視角：每幀依 GMST（地球轉了多少）的變化，把鏡頭和星空反向轉同樣角度，
+// 畫面上就變成地球在自轉、軌道平面和星空不動。軌道線、尾巴改用慣性座標畫（見 updatePath、updateTail）。
+// 只轉太空俯瞰的鏡頭；台灣仰望本來就是站在地面上看。
+const SPIN_KEY = 'spin-enabled';
+const Y_AXIS = new THREE.Vector3(0, 1, 0);
+const SPIN_JUMP_MS = 10 * 60e3; // 一幀內時間跳超過這麼多（跳到過境、回放拖時間軸）就不轉鏡頭，免得台灣被轉走
+let spinLast = null; // { ms, gmst }
+const wrapPi = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+function setSpin(on) {
+  spin = on;
+  spinLast = null;
+  for (const s of sats.values()) s.pathAt = -Infinity;
+  $('spin-toggle').setAttribute('aria-pressed', String(on));
+  try { localStorage.setItem(SPIN_KEY, on ? '1' : '0'); } catch { /* optional */ }
+  tickSlow();
+}
+// frame() 每幀、在 controls.update() 之前呼叫
+function applySpin(ms) {
+  if (!spin) return;
+  const gmst = sgp4.gstime(new Date(ms));
+  if (spinLast && Math.abs(ms - spinLast.ms) < SPIN_JUMP_MS) {
+    const d = wrapPi(gmst - spinLast.gmst);
+    // 地球往東轉 d → 太空固定的東西在「地球座標」裡往西轉 d（繞 +Y 轉負角度 = 經度減少）
+    if (view === 'space') camera.position.applyAxisAngle(Y_AXIS, -d);
+    stars.rotation.y -= d;
+  }
+  spinLast = { ms, gmst };
+  for (const s of sats.values()) {
+    if (s.pathGmst != null) s.path.rotation.y = -wrapPi(gmst - s.pathGmst);
+  }
+}
+$('spin-toggle').addEventListener('click', () => setSpin(!spin));
 
 // ---------- 回放 ----------
 // 用伺服器記錄的歷史資料（雲圖每 10 分鐘一張、保留 24 小時；星鏈 TLE 每 2.5 小時一份、保留 30 天），
@@ -1321,12 +1550,14 @@ function frame() {
   const ms = clockMs();
   for (const s of sats.values()) updateSat(s, ms);
   starlink.update(ms, up, sim ? Math.max(1, sim.speed) : 1);
+  applySpin(ms);
   if (view === 'space') {
     adjustSpaceCamera();
     controls.update();
     applyTilt();
     taiwanTiles?.update();
   } else aimSky();
+  weather.update(view === 'space' && !hiddenByEarth(up.clone().multiplyScalar(1.001)));
   renderAltitude();
   starlink.updateModels(camera, canvas.clientHeight, earthUniforms.sunDir.value);
   updateLabels();
@@ -1393,9 +1624,15 @@ async function start() {
   let cloudsOn = params.get('clouds') === '1';
   try { cloudsOn ||= localStorage.getItem(CLOUDS_KEY) === '1'; } catch { /* optional */ }
   if (cloudsOn) setClouds(true);
+  let weatherOn = params.get('weather') === '1';
+  try { weatherOn ||= localStorage.getItem(WEATHER_KEY) === '1'; } catch { /* optional */ }
+  if (weatherOn) setWeather(true);
   let gridOn = params.get('grid') === '1';
   try { gridOn ||= localStorage.getItem(GRID_KEY) === '1'; } catch { /* optional */ }
   if (gridOn) setGraticule(true);
+  let spinOn = params.get('spin') === '1';
+  try { spinOn ||= localStorage.getItem(SPIN_KEY) === '1'; } catch { /* optional */ }
+  if (spinOn) setSpin(true);
   updateReplayButton();
 
   loadIds().forEach(createSat);

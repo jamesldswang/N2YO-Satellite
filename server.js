@@ -313,6 +313,40 @@ setInterval(() => {
   if (clouds || fs.existsSync(CLOUDS_HISTORY_DIR)) getClouds().catch(() => {});
 }, CLOUDS_CHECK);
 
+// 氣象署測站即時觀測（O-A0003-001，約 360 站、每 10 分鐘，公開 S3 不用授權碼），給溫度／風圖層用。
+// 只回傳畫面需要的欄位；缺測（-99 之類）變成 null。
+const WEATHER_URL = 'https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Observation/O-A0003-001.json';
+const WEATHER_TTL = 3 * 60e3;
+async function getWeather() {
+  return cached('weather', WEATHER_TTL, async () => {
+    let res;
+    try {
+      res = await fetch(WEATHER_URL, { signal: AbortSignal.timeout(30000) });
+    } catch {
+      throw new ApiError(502, '無法連線到氣象署');
+    }
+    if (!res.ok) throw new ApiError(502, `氣象署回應 HTTP ${res.status}`);
+    const list = (await res.json())?.cwaopendata?.dataset?.Station;
+    if (!Array.isArray(list)) throw new ApiError(502, '氣象署資料格式不符');
+    const num = (v) => { const n = Number(v); return Number.isFinite(n) && n > -90 ? n : null; };
+    const stations = [];
+    let obsTime = 0;
+    for (const st of list) {
+      const wgs = (st.GeoInfo?.Coordinates || []).find((c) => c.CoordinateName === 'WGS84') || {};
+      const lat = num(wgs.StationLatitude), lon = num(wgs.StationLongitude);
+      const t = Date.parse(st.ObsTime?.DateTime);
+      if (lat === null || lon === null || !Number.isFinite(t)) continue;
+      const w = st.WeatherElement || {};
+      obsTime = Math.max(obsTime, t);
+      stations.push({
+        id: String(st.StationId), name: String(st.StationName || ''), lat, lon, t,
+        temp: num(w.AirTemperature), wdir: num(w.WindDirection), wspd: num(w.WindSpeed),
+      });
+    }
+    return { obsTime, stations };
+  });
+}
+
 async function getClouds() {
   if (!clouds || Date.now() - clouds.checkedAt > CLOUDS_CHECK) {
     cloudsLoading ??= refreshClouds().finally(() => { cloudsLoading = null; });
@@ -421,6 +455,14 @@ const server = http.createServer(async (req, res) => {
       const { image, obsTime } = await getClouds();
       res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-store', 'X-Obs-Time': obsTime });
       res.end(image);
+    } catch (err) {
+      sendJson(res, err.status || 500, { error: err.status ? err.message : '伺服器錯誤' });
+    }
+    return;
+  }
+  if (pathname === '/api/weather') {
+    try {
+      sendJson(res, 200, await getWeather());
     } catch (err) {
       sendJson(res, err.status || 500, { error: err.status ? err.message : '伺服器錯誤' });
     }

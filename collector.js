@@ -114,17 +114,32 @@ function startCollector(dataDir, log = console.log) {
   }
 
   // ---------- 東亞雲圖 ----------
+  const stampMs = (name) => {
+    const m = name.match(/^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})Z\.jpg$/);
+    return m ? Date.parse(`${m[1]}T${m[2]}:${m[3]}:00Z`) : NaN;
+  };
+  // 這個間隔裡（slotStart ～ ms）已經存過一張了嗎
+  function cloudSlotSaved(dir, slotStart, ms) {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { return false; }
+    return names.some((n) => { const t = stampMs(n); return t >= slotStart && t <= ms; });
+  }
+
   async function collectClouds() {
     const meta = await (await fetch(`${S3}O-B0032-003.json`, { signal: AbortSignal.timeout(15000) })).json();
     const ds = meta?.cwaopendata?.dataset;
     const ms = Date.parse(ds?.ObsTime?.Datetime);
     const url = ds?.Resource?.ProductURL;
     if (!Number.isFinite(ms) || typeof url !== 'string' || !url.startsWith(S3)) throw new Error('格式不符');
-    if (Math.round(ms / 60e3) % cloudEvery !== 0) return; // 只存整點（或設定的間隔）
+    // 每個間隔（預設整點）存一張。氣象署延遲 15–25 分鐘才上傳、偶爾整張跳過，
+    // 所以整點那張沒拿到時，改存同一間隔前半段裡最早拿到的那張（檔名用真正的觀測時間）。
+    const slotMs = cloudEvery * 60e3;
+    const slotStart = Math.floor(ms / slotMs) * slotMs;
+    if (ms - slotStart > slotMs / 2) return;
     const stamp = new Date(ms).toISOString().slice(0, 16).replace(':', '-');
     const dir = path.join(cloudDir, stamp.slice(0, 7));
     const file = path.join(dir, `${stamp}Z.jpg`);
-    if (fs.existsSync(file)) return;
+    if (cloudSlotSaved(dir, slotStart, ms)) return;
     const res = await fetch(url, { signal: AbortSignal.timeout(60000) });
     const image = Buffer.from(await res.arrayBuffer());
     if (!res.ok || image[0] !== 0xff || image[1] !== 0xd8) throw new Error(`HTTP ${res.status}`);
@@ -136,8 +151,7 @@ function startCollector(dataDir, log = console.log) {
       for (const month of fs.readdirSync(cloudDir)) {
         const mdir = path.join(cloudDir, month);
         for (const name of fs.readdirSync(mdir)) {
-          const m = name.match(/^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})Z\.jpg$/);
-          if (m && Date.parse(`${m[1]}T${m[2]}:${m[3]}:00Z`) < cutoff) fs.unlinkSync(path.join(mdir, name));
+          if (stampMs(name) < cutoff) fs.unlinkSync(path.join(mdir, name));
         }
         if (!fs.readdirSync(mdir).length) fs.rmdirSync(mdir);
       }

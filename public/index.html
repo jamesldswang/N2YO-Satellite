@@ -35,6 +35,12 @@
       <button id="clouds-toggle" type="button" aria-pressed="false" title="顯示中央氣象署的向日葵衛星紅外線雲圖（每 10 分鐘更新）">衛星雲圖</button>
       <span id="clouds-info" hidden></span>
     </div>
+    <div class="starlink">
+      <button id="weather-toggle" type="button" aria-pressed="false" title="顯示中央氣象署約 360 個測站的即時氣溫（點的顏色）和風（箭頭往下風處，越長風越大）">溫度／風</button>
+      <span id="weather-legend" hidden><span>0°</span><i></i><span>35°C</span></span>
+      <span id="weather-info" hidden></span>
+    </div>
+    <button id="spin-toggle" type="button" aria-pressed="false" title="改用太空固定的視角：星空和軌道平面不動，看到地球在底下自轉（每小時 15°，搭配加速模擬比較明顯）。軌道線會變成閉合的橢圓">地球自轉</button>
     <button id="grid-toggle" type="button" aria-pressed="false" title="顯示經緯線（每 15° 一條虛線，赤道和本初子午線較亮）">經緯線</button>
     <button id="replay-toggle" type="button" disabled>回放</button>
     <div class="sim">
@@ -53,8 +59,10 @@
       <p class="tab-head"><span id="count"></span></p>
       <ul id="list"></ul>
       <form id="add">
-        <input id="add-id" inputmode="numeric" pattern="[0-9]{1,6}" placeholder="NORAD 編號" aria-label="NORAD 編號" required>
+        <input id="add-id" placeholder="NORAD 編號或名稱" aria-label="NORAD 編號或名稱" autocomplete="off" required
+          role="combobox" aria-controls="add-menu" aria-expanded="false" aria-autocomplete="list">
         <button type="submit">加入</button>
+        <ul id="add-menu" role="listbox" aria-label="還沒追蹤的衛星" hidden></ul>
       </form>
       <p id="quota"></p>
     </section>
