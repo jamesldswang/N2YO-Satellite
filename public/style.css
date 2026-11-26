@@ -63,6 +63,10 @@ body.solar #labels, body.solar #altitude { display: none; }
   border-radius: 10px;
 }
 .bar h1 { font-size: 16px; margin: 0; font-weight: 700; }
+#bar-tools { display: contents; } /* 展開時按鈕照原本一樣排在工具列裡 */
+.bar.collapsed #bar-tools { display: none; }
+#settings-toggle { padding: 3px 8px; font-size: 13px; }
+#settings-toggle[aria-expanded="true"] { background: #eef2f6; color: #0b1622; font-weight: 600; }
 #version { font-size: 12px; font-weight: 400; color: var(--muted); }
 #clock { color: var(--muted); font-variant-numeric: tabular-nums; }
 .segmented { display: flex; }
@@ -215,7 +219,25 @@ body.replaying #replay-toggle { background: var(--accent); color: #17130a; font-
 #notice code { display: block; padding: 8px 10px; background: #000; border-radius: 6px; overflow-x: auto; white-space: pre; }
 #notice a { color: var(--accent); }
 
+/* 衛星清單面板的收起／打開按鈕：貼在面板左邊；收起後貼在畫面右邊 */
+#panel-toggle {
+  position: fixed; z-index: 5; top: 24px; right: calc(310px + 12px - 1px);
+  width: 22px; height: 40px; padding: 0;
+  background: var(--panel); border: 1px solid var(--line); border-right: 0;
+  border-radius: 6px 0 0 6px; font-weight: 700; color: var(--muted);
+}
+#panel-toggle:hover { color: inherit; background: rgba(40, 48, 64, .95); }
+body.panel-closed #panel { display: none; }
+body.panel-closed #panel-toggle { right: 0; }
+body.panel-closed .bar { max-width: calc(100vw - 24px - 22px); }
+body.panel-closed #replay-bar { right: calc(22px + 12px); }
+body.panel-closed #credit { right: calc(22px + 12px); }
+
 @media (max-width: 720px) {
+  #panel-toggle { top: auto; right: 24px; bottom: calc(36vh + 12px - 1px); width: 40px; height: 22px;
+    border: 1px solid var(--line); border-bottom: 0; border-radius: 6px 6px 0 0; }
+  body.panel-closed #panel-toggle { right: 24px; bottom: 0; }
+  body.panel-closed #replay-bar { right: 12px; bottom: calc(22px + 12px); }
   #panel { top: auto; left: 12px; right: 12px; width: auto; height: 36vh; }
   .bar { max-width: calc(100vw - 24px); } /* 面板移到下方了，工具列可以用滿寬度 */
   #replay-bar { right: 12px; bottom: calc(36vh + 24px); }

@@ -1498,6 +1498,30 @@ function setGraticule(on) {
 }
 $('grid-toggle').addEventListener('click', () => setGraticule(!graticule.visible));
 
+// 左上角「⚙ 設定」：收起／展開工具列的所有設定按鈕（預設收起，記在 localStorage）
+const TOOLBAR_KEY = 'toolbar-open';
+function setToolbarOpen(open) {
+  $('bar').classList.toggle('collapsed', !open);
+  $('settings-toggle').setAttribute('aria-expanded', String(open));
+  try { localStorage.setItem(TOOLBAR_KEY, open ? '1' : '0'); } catch { /* optional */ }
+}
+$('settings-toggle').addEventListener('click', () => setToolbarOpen($('bar').classList.contains('collapsed')));
+try { if (localStorage.getItem(TOOLBAR_KEY) === '1') setToolbarOpen(true); } catch { /* optional */ }
+
+// 衛星清單面板旁的「> / <」：收起／打開右邊面板（預設打開，記在 localStorage）
+const PANEL_KEY = 'panel-open';
+function setPanelOpen(open) {
+  document.body.classList.toggle('panel-closed', !open);
+  const btn = $('panel-toggle');
+  btn.textContent = open ? '>' : '<';
+  btn.title = open ? '收起衛星清單' : '打開衛星清單';
+  btn.setAttribute('aria-expanded', String(open));
+  if (!open) hideSatTip();
+  try { localStorage.setItem(PANEL_KEY, open ? '1' : '0'); } catch { /* optional */ }
+}
+$('panel-toggle').addEventListener('click', () => setPanelOpen(document.body.classList.contains('panel-closed')));
+try { if (localStorage.getItem(PANEL_KEY) === '0') setPanelOpen(false); } catch { /* optional */ }
+
 // 地球自轉：場景本來是「地球固定」（台灣永遠在同一個位置，衛星軌跡每圈往西偏）。
 // 開啟後改成太空固定的視角：每幀依 GMST（地球轉了多少）的變化，把鏡頭和星空反向轉同樣角度，
 // 畫面上就變成地球在自轉、軌道平面和星空不動。軌道線、尾巴改用慣性座標畫（見 updatePath、updateTail）。

@@ -19,9 +19,11 @@
   <canvas id="scene"></canvas>
   <div id="labels" aria-hidden="true"></div>
 
-  <header class="bar">
+  <header class="bar collapsed" id="bar">
+    <button id="settings-toggle" type="button" aria-expanded="false" aria-controls="bar-tools" title="顯示／隱藏設定按鈕">⚙ 設定</button>
     <h1>台灣上空衛星 <span id="version"></span></h1>
     <time id="clock"></time>
+    <div id="bar-tools">
     <div class="segmented" role="group" aria-label="視角">
       <button data-view="space" type="button">太空俯瞰</button>
       <button data-view="sky" type="button">台灣仰望</button>
@@ -57,8 +59,10 @@
       <input id="sim-speed" type="range" min="0" max="1000" step="1" value="250" aria-label="模擬倍速（對數刻度，1–10000 倍）" hidden>
       <output id="sim-rate" for="sim-speed" hidden>10×</output>
     </div>
+    </div>
   </header>
 
+  <button id="panel-toggle" type="button" aria-expanded="true" aria-controls="panel" title="收起衛星清單">&gt;</button>
   <aside id="panel">
     <div class="segmented tabs" role="tablist" aria-label="面板">
       <button type="button" role="tab" data-tab="list" aria-selected="true" class="active">追蹤清單</button>
