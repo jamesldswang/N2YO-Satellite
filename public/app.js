@@ -10,6 +10,7 @@ import { CloudLayer } from './clouds.js';
 import { WeatherLayer } from './weather.js';
 import { satInfo, CATALOG, initialName } from './sat-info.js';
 import { makeTail, setTailPoints, disposeTail, tailResolution, TAIL_POINTS } from './tail.js';
+import { SunMoon, phaseName } from './sun-moon.js';
 import { TaiwanTiles } from './taiwan-tiles.js';
 
 const sgp4 = window.satellite;
@@ -66,7 +67,7 @@ controls.enablePan = false;
 controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
 controls.enableDamping = true;
 controls.minDistance = 1.2;
-controls.maxDistance = 18;
+controls.maxDistance = 170; // 約 108 萬公里：看得到整個月球軌道（約 60 個地球半徑）
 // 台灣附近可以拉近到離地 CLOSE_MIN_KM（有高解析圖塊），其他地方維持 FAR_MIN_KM；
 // 中間依相機離台灣多遠（度）漸變，所以轉離台灣時相機會慢慢升高
 const CLOSE_MIN_KM = 15, FAR_MIN_KM = 1274;
@@ -437,7 +438,7 @@ function updateSat(s, ms) {
   // sizeAttenuation:false sprites are scaled in fractions of the viewport height.
   s.sprite.scale.setScalar((Math.max(modelPx * 1.25, RING_MIN_PX)) / canvas.clientHeight);
   s.sprite.material.opacity = selected ? 1 : 0.6;
-  s.sprite.visible = true;
+  s.sprite.visible = !farView();
 
   const showLink = view === 'space' && s.state.el > 0;
   s.link.visible = showLink;
@@ -886,14 +887,21 @@ function hiddenByEarth(point) {
   return t > 0 && t < dist;
 }
 
+// 拉遠到看月球軌道時（鏡頭離地心超過 FAR_VIEW_DIST 個地球半徑），地球只剩十幾像素，
+// 衛星固定大小的圓圈和名稱會擠成一團，所以隱藏（軌道線、模型照樣顯示）
+const FAR_VIEW_DIST = 40;
+const farView = () => view === 'space' && camera.position.length() > FAR_VIEW_DIST;
+
 function updateLabels() {
+  const far = farView();
   for (const s of sats.values()) {
-    const shown = s.state && (view === 'space' ? !hiddenByEarth(s.pos) : s.state.el > 0);
+    const shown = !far && s.state && (view === 'space' ? !hiddenByEarth(s.pos) : s.state.el > 0);
     placeLabel(s.label, s.pos, Boolean(shown));
   }
   for (const { el, world } of compassLabels) placeLabel(el, world, view === 'sky');
   placeLabel(taiwanLabel, up, view === 'space' && !hiddenByEarth(up.clone().multiplyScalar(1.001)));
   placeGridLabel();
+  placeSunMoonLabels();
 }
 
 function resize() {
@@ -908,6 +916,16 @@ window.addEventListener('resize', resize);
 
 // Simulation controls
 const simToggle = $('sim-toggle'), simSpeed = $('sim-speed'), simRate = $('sim-rate');
+// 倍速滑桿是對數刻度：位置 0–1000 對應 1–10000 倍（每 250 格乘 10）。取整到 2 位有效數字，顯示比較整齊
+const SIM_MAX_SPEED = 10000;
+const SIM_STEPS_PER_DECADE = 1000 / Math.log10(SIM_MAX_SPEED);
+function speedFromSlider() {
+  const v = 10 ** (Number(simSpeed.value) / SIM_STEPS_PER_DECADE);
+  if (v < 20) return Math.max(1, Math.round(v));
+  const unit = 10 ** (Math.floor(Math.log10(v)) - 1);
+  return Math.round(v / unit) * unit;
+}
+const sliderFor = (speed) => String(Math.round(Math.log10(speed) * SIM_STEPS_PER_DECADE));
 // speed null = back to live; atMs = simulated time to start from (default: carry on from now).
 function setSim(speed, atMs) {
   sim = speed == null ? null : { fromSim: atMs ?? clockMs(), fromReal: Date.now(), speed };
@@ -915,13 +933,13 @@ function setSim(speed, atMs) {
   simToggle.textContent = on ? '回到即時' : '加速模擬';
   simToggle.setAttribute('aria-pressed', String(on));
   simSpeed.hidden = simRate.hidden = !on;
-  simRate.textContent = `${simSpeed.value}×`;
+  simRate.textContent = `${(sim ? sim.speed : speedFromSlider()).toLocaleString()}×`;
   $('clock').classList.toggle('sim', on);
   for (const s of sats.values()) s.pathAt = -Infinity;
   tickSlow();
 }
-simToggle.addEventListener('click', () => setSim(sim ? null : Number(simSpeed.value)));
-simSpeed.addEventListener('input', () => { if (sim) setSim(Number(simSpeed.value)); });
+simToggle.addEventListener('click', () => setSim(sim ? null : speedFromSlider()));
+simSpeed.addEventListener('input', () => { if (sim) setSim(speedFromSlider()); });
 
 // Pass predictions: computed by SGP4 in a Web Worker (passes-worker.js +
 // passes.js, shared with tools/check-passes.js), so no N2YO quota is used.
@@ -1064,7 +1082,7 @@ function renderPasses() {
 function simulatePass(id, startMs) {
   replay = null; // 點過境預報就離開回放，改成一般的加速模擬
   showReplayBar(false);
-  setSim(Number(simSpeed.value), startMs - 60e3);
+  setSim(speedFromSlider(), startMs - 60e3);
   const ms = clockMs();
   for (const s of sats.values()) updateSat(s, ms); // so select() frames the new position
   if (selectedId !== id) select(id);
@@ -1085,17 +1103,25 @@ function setTab(name) {
 document.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.tab)));
 $('visible-only').addEventListener('change', () => { passKey = ''; renderPasses(); });
 
-function tickSlow() {
-  const nowMs = clockMs();
-  const sun = subsolarPoint(nowMs);
+// 太陽方向（日夜分界、模型光照、地影、太陽圖示都用它）。每幀更新：加速模擬時太陽在地球固定座標裡
+// 一天繞一圈，只在 tickSlow（每 250 毫秒）更新的話，1000 倍時每次跳 1°，開地球自轉時還會跟著鏡頭前後抖
+function updateSun(ms) {
+  const sun = subsolarPoint(ms);
   geoToVec(sun.lat, sun.lng, 0, earthUniforms.sunDir.value).normalize();
   sunLight.position.copy(earthUniforms.sunDir.value).multiplyScalar(50);
+}
+
+function tickSlow() {
+  const nowMs = clockMs();
+  updateSun(nowMs);
   $('clock').textContent = new Date(nowMs).toLocaleString('zh-TW', {
     timeZone: 'Asia/Taipei', hour12: false, year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit',
   });
+  // 軌道線每 30 秒（模擬時間）重算；高倍速時改成約每 0.15 秒真實時間一次，1000 倍時才不會每一幀都重算
+  const pathEvery = Math.max(30000, (sim ? sim.speed : 1) * 150);
   for (const s of sats.values()) {
-    if (Math.abs(nowMs - s.pathAt) >= 30000) { updatePath(s, nowMs); s.pathAt = nowMs; }
+    if (Math.abs(nowMs - s.pathAt) >= pathEvery) { updatePath(s, nowMs); s.pathAt = nowMs; }
   }
   refreshList();
   updateHint();
@@ -1106,6 +1132,7 @@ function tickSlow() {
   renderStarlinkInfo();
   renderCloudInfo();
   renderWeatherInfo();
+  renderSunMoonInfo();
 }
 
 // Starlink layer: off by default; the choice is remembered in this browser.
@@ -1326,22 +1353,42 @@ $('grid-toggle').addEventListener('click', () => setGraticule(!graticule.visible
 // 只轉太空俯瞰的鏡頭；台灣仰望本來就是站在地面上看。
 const SPIN_KEY = 'spin-enabled';
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
-const SPIN_JUMP_MS = 10 * 60e3; // 一幀內時間跳超過這麼多（跳到過境、回放拖時間軸）就不轉鏡頭，免得台灣被轉走
+// 一幀內時間跳超過這麼多（跳到過境、回放拖時間軸）就不轉鏡頭，免得台灣被轉走。
+// 高倍速時正常一幀就會走好幾分鐘，所以門檻跟著倍速放大（約 1 秒真實時間）
+const SPIN_JUMP_MS = 10 * 60e3;
+const spinJumpMs = () => Math.max(SPIN_JUMP_MS, (sim ? sim.speed : 1) * 1000);
 let spinLast = null; // { ms, gmst }
 const wrapPi = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+// 即時模式下地球每小時只轉 15°，看不出來：開自轉時如果還在即時，就自動開 SPIN_SIM_SPEED 倍加速模擬；
+// 關掉自轉時，如果加速模擬是自轉幫忙開的（而且還是那個倍速），就回到即時。回放中不動時鐘。
+const SPIN_SIM_SPEED = 200;
+let spinStartedSim = false;
+let spinPrevSpeed = null; // 自動開加速前滑桿的倍速，回到即時時還原
 function setSpin(on) {
   spin = on;
   spinLast = null;
   for (const s of sats.values()) s.pathAt = -Infinity;
   $('spin-toggle').setAttribute('aria-pressed', String(on));
   try { localStorage.setItem(SPIN_KEY, on ? '1' : '0'); } catch { /* optional */ }
+  if (on && !sim && !replay) {
+    spinPrevSpeed = simSpeed.value;
+    simSpeed.value = sliderFor(SPIN_SIM_SPEED);
+    setSim(SPIN_SIM_SPEED);
+    spinStartedSim = true;
+    return; // setSim 已經呼叫 tickSlow
+  }
+  if (!on && spinStartedSim && sim && !replay && sim.speed === SPIN_SIM_SPEED) {
+    if (spinPrevSpeed !== null) simSpeed.value = spinPrevSpeed;
+    setSim(null);
+  }
+  spinStartedSim = false;
   tickSlow();
 }
 // frame() 每幀、在 controls.update() 之前呼叫
 function applySpin(ms) {
   if (!spin) return;
   const gmst = sgp4.gstime(new Date(ms));
-  if (spinLast && Math.abs(ms - spinLast.ms) < SPIN_JUMP_MS) {
+  if (spinLast && Math.abs(ms - spinLast.ms) < spinJumpMs()) {
     const d = wrapPi(gmst - spinLast.gmst);
     // 地球往東轉 d → 太空固定的東西在「地球座標」裡往西轉 d（繞 +Y 轉負角度 = 經度減少）
     if (view === 'space') camera.position.applyAxisAngle(Y_AXIS, -d);
@@ -1353,6 +1400,56 @@ function applySpin(ms) {
   }
 }
 $('spin-toggle').addEventListener('click', () => setSpin(!spin));
+
+// 太陽、月亮（sun-moon.js）：各自一個開關，記在這個瀏覽器。旁邊顯示從台灣看的仰角、方位（月亮再加月相）。
+const sunMoon = new SunMoon(scene, TEX);
+const sunLabel = makeLabel('place', '太陽');
+const moonLabel = makeLabel('place', '月亮');
+const SUN_KEY = 'sun-enabled', MOON_KEY = 'moon-enabled';
+function setSunShown(on) {
+  sunMoon.sunOn = on;
+  $('sun-toggle').setAttribute('aria-pressed', String(on));
+  $('sun-info').hidden = !on;
+  try { localStorage.setItem(SUN_KEY, on ? '1' : '0'); } catch { /* optional */ }
+  renderSunMoonInfo();
+}
+function setMoonShown(on) {
+  sunMoon.moonOn = on;
+  $('moon-toggle').setAttribute('aria-pressed', String(on));
+  $('moon-info').hidden = !on;
+  try { localStorage.setItem(MOON_KEY, on ? '1' : '0'); } catch { /* optional */ }
+  renderSunMoonInfo();
+}
+// 從台灣看的仰角、方位（world：場景座標）
+const topoDir = new THREE.Vector3();
+function lookFromTaiwan(world) {
+  topoDir.copy(world).sub(up).normalize();
+  const el = Math.asin(THREE.MathUtils.clamp(topoDir.dot(up), -1, 1)) / DEG;
+  const az = (Math.atan2(topoDir.dot(east), topoDir.dot(north)) / DEG + 360) % 360;
+  return { el, az };
+}
+const fmtLook = ({ el, az }) => `仰角 ${el >= 0 ? '+' : '−'}${Math.abs(el).toFixed(1)}° · 方位 ${az.toFixed(0)}° ${compassName(az)}`;
+// tickSlow 每 250 毫秒呼叫（數字不用每幀更新）
+function renderSunMoonInfo() {
+  if (sunMoon.sunOn) {
+    const text = fmtLook(lookFromTaiwan(sunMoon.sunPos));
+    if ($('sun-info').textContent !== text) $('sun-info').textContent = text;
+  }
+  if (sunMoon.moonOn && sunMoon.moonInfo) {
+    const { illum, elong } = sunMoon.moonInfo;
+    const text = `${fmtLook(lookFromTaiwan(sunMoon.moonPos))} · ${phaseName(elong)} ${Math.round(illum * 100)}%`;
+    if ($('moon-info').textContent !== text) $('moon-info').textContent = text;
+  }
+}
+// updateLabels 每幀呼叫：太空俯瞰時被地球擋住、台灣仰望時在地平線下就不顯示
+function placeSunMoonLabels() {
+  const shown = (on, world) => on && (view === 'space' ? !hiddenByEarth(world) : lookFromTaiwan(world).el > 0);
+  const sunShown = sunMoon.sunOn && (view === 'space' ? !hiddenByEarth(sunMoon.sunDrawPos) : lookFromTaiwan(sunMoon.sunPos).el > 0);
+  placeLabel(sunLabel, sunMoon.sunDrawPos, sunShown);
+  placeLabel(moonLabel, sunMoon.moonPos, shown(sunMoon.moonOn, sunMoon.moonPos));
+}
+$('sun-toggle').addEventListener('click', () => setSunShown(!sunMoon.sunOn));
+$('moon-toggle').addEventListener('click', () => setMoonShown(!sunMoon.moonOn));
 
 // ---------- 回放 ----------
 // 用伺服器記錄的歷史資料（雲圖每 10 分鐘一張、保留 24 小時；星鏈 TLE 每 2.5 小時一份、保留 30 天），
@@ -1538,8 +1635,11 @@ function adjustSpaceCamera() {
   // 拉遠時（alt > 約 1.4）回到 1
   controls.rotateSpeed = Math.min(1, 0.132 * alt * (1 + 3 * alt));
   const near = THREE.MathUtils.clamp(alt * 0.3, 2e-5, 0.05);
-  if (Math.abs(near - camera.near) > near * 0.2) {
+  // 遠裁切面：平常 400；拉遠看月球軌道時跟著放大，月亮、太陽、星空才不會被切掉
+  const far = Math.max(400, dist * 2.5 + 100);
+  if (Math.abs(near - camera.near) > near * 0.2 || Math.abs(far - camera.far) > far * 0.05) {
     camera.near = near;
+    camera.far = far;
     camera.updateProjectionMatrix();
   }
   // 拉近到高解析影像看得清楚時，粗略的台灣輪廓線反而擋住海岸線
@@ -1548,6 +1648,7 @@ function adjustSpaceCamera() {
 
 function frame() {
   const ms = clockMs();
+  updateSun(ms);
   for (const s of sats.values()) updateSat(s, ms);
   starlink.update(ms, up, sim ? Math.max(1, sim.speed) : 1);
   applySpin(ms);
@@ -1560,6 +1661,10 @@ function frame() {
   weather.update(view === 'space' && !hiddenByEarth(up.clone().multiplyScalar(1.001)));
   renderAltitude();
   starlink.updateModels(camera, canvas.clientHeight, earthUniforms.sunDir.value);
+  sunMoon.update(ms, earthUniforms.sunDir.value, camera, canvas.clientHeight, view === 'sky');
+  // 背景星空跟著鏡頭走、放在遠裁切面附近：拉遠時鏡頭才不會跑出星空球、星星跑到地球前面
+  stars.position.copy(camera.position);
+  stars.scale.setScalar((camera.far * 0.8) / 120);
   updateLabels();
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
@@ -1633,6 +1738,11 @@ async function start() {
   let spinOn = params.get('spin') === '1';
   try { spinOn ||= localStorage.getItem(SPIN_KEY) === '1'; } catch { /* optional */ }
   if (spinOn) setSpin(true);
+  for (const [key, param, set] of [[SUN_KEY, 'sun', setSunShown], [MOON_KEY, 'moon', setMoonShown]]) {
+    let on = params.get(param) === '1';
+    try { on ||= localStorage.getItem(key) === '1'; } catch { /* optional */ }
+    if (on) set(true);
+  }
   updateReplayButton();
 
   loadIds().forEach(createSat);
