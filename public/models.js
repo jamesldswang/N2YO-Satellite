@@ -3,23 +3,95 @@
 // 每個模型會縮放到最長邊 = 1，實際畫面大小由 app.js 依距離調整。
 import * as THREE from 'three';
 
+// 金屬外皮：金屬度高、加上程式產生的紋理（皺摺金箔、拉絲金屬、太陽能電池格）。
+// 金屬的顏色主要來自反射環境，所以 app.js 要設定 scene.environment，不然金屬會是黑的。
 const MATERIALS = {
-  gold:   { color: 0xc9a227, metalness: 0.3, roughness: 0.45 },               // 隔熱金箔
-  white:  { color: 0xe6e8ea, metalness: 0.1, roughness: 0.6 },                // 艙段、散熱板
-  silver: { color: 0xc3c9d1, metalness: 0.35, roughness: 0.35 },              // 哈伯外殼
-  panel:  { color: 0x2c55a8, metalness: 0.3, roughness: 0.35, emissive: 0x0c1a3d }, // 太陽能板
-  dark:   { color: 0x3a3d42, metalness: 0.2, roughness: 0.6 },
+  gold:   { color: 0xd4a73a, metalness: 1.0, roughness: 0.32, tex: 'foil', bumpScale: 0.7 },     // 隔熱金箔（MLI）
+  white:  { color: 0xdfe3e8, metalness: 0.7, roughness: 0.32, tex: 'brushed', bumpScale: 0.4 }, // 鋁合金艙段、散熱板
+  silver: { color: 0xd0d6de, metalness: 1.0, roughness: 0.22, tex: 'foil', bumpScale: 0.6 },    // 哈伯的銀色隔熱層
+  panel:  { color: 0x6f86c8, metalness: 0.35, roughness: 0.4, envMapIntensity: 0.35, tex: 'cells', emissive: 0x0a1630 }, // 太陽能板
+  dark:   { color: 0x5a5f66, metalness: 0.9, roughness: 0.4, tex: 'brushed', bumpScale: 0.4 },  // 桁架、支架
 };
+const TEX_PER_UNIT = 10; // 長方體每單位長度重複幾次紋理（模型最長邊約 1）
 
-// 每個模型有自己的材質，才能個別調暗（進入地球陰影時）。
+let textures = null;
+function canvasTexture(size, draw, srgb) {
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  draw(c.getContext('2d'), size);
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.anisotropy = 4;
+  if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+function getTextures() {
+  if (textures) return textures;
+  textures = {
+    // 皺摺的金屬箔：隨機的亮暗多邊形當凹凸貼圖
+    foil: { bumpMap: canvasTexture(256, (g, n) => {
+      g.fillStyle = '#808080'; g.fillRect(0, 0, n, n);
+      for (let i = 0; i < 260; i++) {
+        const v = 105 + Math.floor(Math.random() * 50);
+        g.fillStyle = `rgb(${v},${v},${v})`;
+        g.beginPath();
+        const x = Math.random() * n, y = Math.random() * n, r = 8 + Math.random() * 26;
+        for (let k = 0; k < 5; k++) {
+          const a = (k / 5) * Math.PI * 2 + Math.random();
+          g.lineTo(x + Math.cos(a) * r * (0.5 + Math.random()), y + Math.sin(a) * r * (0.5 + Math.random()));
+        }
+        g.fill();
+      }
+    }) },
+    // 拉絲金屬：橫向細紋
+    brushed: { bumpMap: canvasTexture(256, (g, n) => {
+      for (let y = 0; y < n; y++) {
+        const v = 110 + Math.floor(Math.random() * 40);
+        g.fillStyle = `rgb(${v},${v},${v})`;
+        g.fillRect(0, y, n, 1);
+      }
+    }) },
+    // 太陽能電池：深藍色的格子，格線是銀色的
+    cells: { map: canvasTexture(128, (g, n) => {
+      g.fillStyle = '#c8ccd2'; g.fillRect(0, 0, n, n);
+      const k = n / 4;
+      for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
+        const v = Math.floor(Math.random() * 14);
+        g.fillStyle = `rgb(${14 + v},${32 + v},${92 + v})`;
+        g.fillRect(i * k + 2, j * k + 2, k - 4, k - 4);
+      }
+    }, true) },
+  };
+  return textures;
+}
+
+// 每個模型有自己的材質，才能個別調暗（進入地球陰影時）；紋理共用。
 function materialSet() {
   const set = {};
-  for (const [k, v] of Object.entries(MATERIALS)) set[k] = new THREE.MeshStandardMaterial(v);
+  const tex = getTextures();
+  for (const [k, { tex: name, ...v }] of Object.entries(MATERIALS)) {
+    set[k] = new THREE.MeshStandardMaterial({ ...v, ...tex[name] });
+  }
   return set;
 }
 
+// BoxGeometry 每一面的 uv 都是 0–1，長條的太陽能板紋理會被拉長；改成依邊長重複。
+// 面的順序：+x、−x（d × h）、+y、−y（w × d）、+z、−z（w × h），每面 4 個頂點。
+function scaleBoxUv(geo, w, h, d) {
+  const uv = geo.attributes.uv;
+  const sizes = [[d, h], [d, h], [w, d], [w, d], [w, h], [w, h]];
+  for (let f = 0; f < 6; f++) {
+    const [su, sv] = sizes[f];
+    for (let i = f * 4; i < f * 4 + 4; i++) {
+      uv.setXY(i, uv.getX(i) * Math.max(su * TEX_PER_UNIT, 1), uv.getY(i) * Math.max(sv * TEX_PER_UNIT, 1));
+    }
+  }
+}
+
 function box(g, m, w, h, d, x = 0, y = 0, z = 0) {
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+  const geo = new THREE.BoxGeometry(w, h, d);
+  scaleBoxUv(geo, w, h, d);
+  const mesh = new THREE.Mesh(geo, m);
   mesh.position.set(x, y, z);
   g.add(mesh);
   return mesh;
@@ -94,7 +166,18 @@ function geo(g, m) {
   cyl(g, m.white, 0.06, 0.03, 'y', 0.07, 0.14, 0);
 }
 
-const BUILDERS = { iss, tiangong, hubble, generic, geo };
+// 星鏈 V2 Mini：扁平的本體（約 2.7 × 4.1 m，朝地球那面是相位陣列天線），
+// 左右各一片長條太陽能板，翼展約 30 m。
+function starlink(g, m) {
+  box(g, m.dark, 0.09, 0.02, 0.14);
+  box(g, m.white, 0.084, 0.004, 0.13, 0, -0.012, 0);
+  for (const s of [-1, 1]) {
+    box(g, m.silver, 0.04, 0.006, 0.006, s * 0.065, 0, 0); // 支架
+    box(g, m.panel, 0.4, 0.003, 0.14, s * 0.29, 0, 0);
+  }
+}
+
+const BUILDERS = { iss, tiangong, hubble, generic, geo, starlink };
 const KNOWN = { 25544: 'iss', 48274: 'tiangong', 20580: 'hubble' };
 
 // 依 NORAD 編號選模型；不認得的依軌道週期分成同步衛星或一般衛星。

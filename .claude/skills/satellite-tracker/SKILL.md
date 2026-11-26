@@ -13,10 +13,12 @@ description: 修改、測試「台灣上空衛星」網頁（D:\Personal_Git\sat
 |------|------|
 | `server.js` | 靜態伺服器 + `/api/starlink`（CelesTrak 星鏈 TLE）、`/api/clouds`、`/api/history`、`/api/starlink|clouds/history/<檔名>`（回放用）、`/api/config`、`/api/positions/:id`、`/api/tle/:id`、`/api/passes/radio|visual/:id`（N2YO 過境預報，只給測試工具用，快取 1 小時）。觀測點 `OBSERVER`、快取（`cached()`）、版號從 `package.json` 讀 |
 | `public/app.js` | **前端全部邏輯**：場景、地球 shader、觀測點座標系、衛星資料抓取、位置計算、清單、視角切換、加速模擬 |
-| `public/models.js` | 衛星 3D 模型（ES module）：`makeSatModel(kind)`、`modelKind(id, satrec)`、`setModelLit(g, lit)`、`disposeModel(g)`。模型座標 +X 側向、+Y 天頂、+Z 前進方向，建好後自動縮放到最長邊 = 1 |
-| `public/starlink.js` | 星鏈圖層 `StarlinkLayer`（ES module）：`enable()`、`disable()`、每幀 `update(ms, up, fast)`。Points 一個 draw call 畫上萬顆 |
+| `public/models.js` | 衛星 3D 模型（ES module），金屬外皮（`MATERIALS` 的金屬度、程式產生的紋理 `getTextures()` 共用；**要有 `scene.environment`（app.js 的 RoomEnvironment），不然金屬是黑的**）：`makeSatModel(kind)`、`modelKind(id, satrec)`、`setModelLit(g, lit)`、`disposeModel(g)`。模型座標 +X 側向、+Y 天頂、+Z 前進方向，建好後自動縮放到最長邊 = 1 |
+| `public/starlink.js` | 星鏈圖層 `StarlinkLayer`（ES module）：`enable()`、`disable()`、每幀 `update(ms, up, fast)`、`updateModels(camera, viewPx, sunDir)`。Points 一個 draw call 畫上萬顆；離鏡頭最近的 `MODEL_MAX` 顆另外畫 3D 模型（`makeSatModel('starlink')`，重複使用），畫面大小 = `MODEL_PX × MODEL_REF_KM ÷ 距離`，小於 `MODEL_MIN_PX` 就不畫 |
 | `public/starlink-worker.js` | Web Worker：解析整份星鏈 TLE，`tick` 時算出全部的場景座標位置和速度（Float32Array，用 transfer 傳回） |
 | `public/clouds.js` | 衛星雲圖圖層 `CloudLayer`（ES module）：`enable()`、`disable()`、`load()`；`status`、`obsTime`。比地球大一點的球，shader 用靜止衛星公式取樣 |
+| `public/taiwan-tiles.js` | 台灣高解析影像 `TaiwanTiles`（ES module）：四分樹圖塊 LOD，每幀 `update()`、`hideAll()`。範圍等設定來自 `/api/config` 的 `twTiles` |
+| `public/textures/` | `earth_bluemarble_5400.jpg`（日間地球貼圖）、`taiwan-sea-mask.png`（台灣外海遮罩，由 `tools/make-sea-mask.py` 產生） |
 | `public/passes.js` | 過境預報演算法 `SatPasses.compute()`。一般 script（不是 module），掛在全域，**Web Worker 和 `tools/check-passes.js` 共用**，所以不能用 DOM、不能用 import |
 | `public/passes-worker.js` | Web Worker：`importScripts` 載入 satellite.js 和 passes.js，算完 postMessage 回主執行緒 |
 | `public/index.html` | 頁面骨架；importmap 載入 three@0.170.0，`<script>` 載入 satellite.js@5.0.0 |
@@ -116,6 +118,15 @@ description: 修改、測試「台灣上空衛星」網頁（D:\Personal_Git\sat
   - 預設永久保留；`WEATHER_KEEP_DAYS`、`CLOUDS_ARCHIVE_KEEP_DAYS`、`COLLECT=0`。
   - 測試：`DATA_DIR` 指到 scratchpad、另開 `PORT`，啟動兩次確認不會重複寫；注意 `migrateOldCache()` 會把專案的 `.cache/` 複製進測試資料夾，測完整個刪掉。
   - 開機自動啟動：`autostart.cmd on|off`（在 Startup 資料夾建 `SatelliteTracker.lnk` → `wscript start.vbs /background`）。**Claude 不能自己執行 `on`**（會被權限擋，屬於常駐），要請使用者自己跑；測試時把腳本複製到 scratchpad、把 LNK 改成 scratchpad 路徑。
+- **台灣高解析影像**（`taiwan-tiles.js`、`server.js` 的 `TW_TILES`）：
+  - 資料是 EOX WMS：白天 `s2cloudless-2025`（**CC BY-NC-SA 4.0，一定要顯示出處**）、夜晚 `blackmarble`（NASA，標示出處），EPSG:4326、JPEG。`#credit` 在有圖塊顯示時出現。`/api/twtile/<day|night>/<z>/<x>/<y>.jpg`：範圍 5° 見方的四分樹，`y` 從南邊數，白天 z 0–6、夜晚 z 0–2（`nightMaxZ`，原始約 500 m），每塊 512²；第一次由伺服器下載（同時最多 4 個，in-flight 去重），存 `DATA_DIR/tw-tiles/<layer>/<z>/<x>_<y>.jpg`。**圖塊不進 git、不進打包**。
+  - 每塊是自己的球面網格（16×16），`depthWrite: false`、`renderOrder = -20 + z`：比雲圖、大氣早畫，細的蓋粗的。子圖塊沒到之前看得到父圖塊；選圖塊條件是「圖塊每像素 > 螢幕每像素」就往下一層。
+  - shader 和地球共用 `EARTH_SHADE`（日夜光影）。白天顏色在 shader 裡合成：外海遮罩（白 = 外海，`RedFormat`，載入前不顯示圖塊）的地方取地球的 Blue Marble（`dayMap`），其他取 Sentinel-2；**不要改回讓外海透明**，不然晚上底圖的低解析燈光會在海岸外留方塊光暈。圖塊只有範圍邊緣 0.3° 淡出。
+  - 夜晚燈光：`applyNight()` 每幀找自己或第 `nightMaxZ` 層祖先的 Black Marble，用 `nightRect` 取其中一小塊。Black Marble 底色 (0, 1, 29) 要扣掉、再補上底圖燈光圖的底色 (8, 8, 16)，範圍邊緣才不會出現藍色或黑色方框。夜間圖塊先於白天圖塊下載，`dark()`（太陽照得到的）不下載。還沒載入時用地球的燈光圖，拉近時用 `nightGain` 調暗。
+  - 整體依「範圍中心附近每螢幕像素幾公里」淡入（8 km → 3 km），太遠時不顯示也不下載。
+  - 拉近：`adjustSpaceCamera()` 每幀依相機離台灣幾度設定 `controls.minDistance`（4° 內 15 km，12° 外 1274 km，中間漸變），`zoomSpeed`、`rotateSpeed` 依高度變慢，`camera.near` 跟著高度（不然低空會切到地面）。離地 400 km 以內隱藏 `taiwanGroup`（海岸線，Natural Earth 1:10m，`public/taiwan-coast.json`，`tools/make-coastline.py` 產生；用 Line2 + `LineMaterial` 才能畫 2 像素寬，`resize()` 要更新 `coastMaterial.resolution`）。
+  - 改範圍：`server.js` 的 `TW_TILES` 和 `tools/make-sea-mask.py` 的 `WEST/SOUTH/SIZE` 要一致，重新產生遮罩，刪掉 `tw-tiles/`。
+  - 測試：`DATA_DIR` 指到 scratchpad、另開 `PORT`；用 DevTools Protocol 送 `Input.dispatchMouseEvent` 的 `mouseWheel`（約 35 格到最低）拉近再截圖。台灣是晚上時畫面很暗，可以用 `Page.addScriptToEvaluateOnNewDocument` 把 `Date.now` 往後調幾小時再測。
 - **瀏覽器記住的清單**（localStorage `tracked-satellites`）會蓋過 `DEFAULT_IDS`。
 - 這台電腦是 Windows，git 會出現 LF → CRLF 的警告，不影響。
 
@@ -127,6 +138,7 @@ description: 修改、測試「台灣上空衛星」網頁（D:\Personal_Git\sat
 - **軌道線**：`updatePath(s, ms)`。
 - **清單**：`makeRow(s)`、`refreshList()`（依仰角排序）、`select(id)`、`renderCount()`。
 - **視角**：`setView('space' | 'sky')`、`homeSpace()`、`aimSky()`、`skyDirection(az, el)`、`updateHint()`。
+- **斜看（太空俯瞰）**：`tilt`、`heading`（弧度），右鍵或 Shift＋左鍵拖曳時改（拖曳中 `controls.enabled = false`）。`frame()` 在 `controls.update()` 之後呼叫 `applyTilt()`（OrbitControls 每次 update 都會 lookAt 地心，所以每幀重轉；`rotateZ(heading)` 再 `rotateX(tilt)`），`maxTilt(altKm)` 在 3000–8000 km 漸漸變 0。左下角 `#altitude` 由 `renderAltitude()` 每幀更新。
 - **模型**：`placeModel(s, selected)`、`modelKind()`、`makeSatModel()`；TLE 載入後若判斷出的種類不同（例如新加的是同步衛星）會換模型。
 - **標籤**：`makeLabel()`、`placeLabel()`、`hiddenByEarth()`、`updateLabels()`。
 - **模擬**：`sim`（`null` 或 `{ fromSim, fromReal, speed }`）、`clockMs()`、`setSim(speed | null, atMs?)`（`atMs` 指定從哪個時刻開始）。

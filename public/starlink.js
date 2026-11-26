@@ -2,6 +2,20 @@
 // 資料：伺服器的 /api/starlink（CelesTrak 的 TLE，伺服器端快取）。
 // 計算：starlink-worker.js 定期算出位置和速度，這裡每一幀外插，並標出在台灣地平線上的。
 import * as THREE from 'three';
+import { makeSatModel, setModelLit } from './models.js';
+
+// 近距離的 3D 模型：離鏡頭最近的 MODEL_MAX 顆。真實大小（翼展約 30 m）在幾十公里外就不到 1 像素，
+// 所以畫面大小改成 MODEL_PX × MODEL_REF_KM ÷ 距離（越近越大），小於 MODEL_MIN_PX 就不畫模型、只留光點。
+const EARTH_KM = 6371;
+const MODEL_MAX = 60;
+const MODEL_PX = 48, MODEL_MIN_PX = 6, MODEL_REF_KM = 600;
+const MODEL_RANGE = (MODEL_PX * MODEL_REF_KM) / MODEL_MIN_PX / EARTH_KM;
+const MODEL_REAL = 0.03 / EARTH_KM; // 真實翼展：比像素大小還大時（1 公里內）用真實大小
+const DEG = Math.PI / 180;
+const frustum = new THREE.Frustum();
+const projView = new THREE.Matrix4();
+const vP = new THREE.Vector3(), vUp = new THREE.Vector3(), vFwd = new THREE.Vector3(), vRight = new THREE.Vector3();
+const basis = new THREE.Matrix4();
 
 const COLOR_UP = new THREE.Color(0xd9f1ff);   // 在台灣地平線上
 const COLOR_DOWN = new THREE.Color(0x4f6680); // 其他
@@ -22,6 +36,8 @@ export class StarlinkLayer {
     this.dataset = null;   // null = 最新資料（/api/starlink）；字串 = 歷史備份檔名（回放用）
     this.wanted = null;    // 想要切換到的資料
     this.switching = false;
+    this.models = [];      // 近距離 3D 模型（重複使用）
+    this.near = [];        // 這一幀要畫模型的 [距離, 索引]
   }
 
   // 回放時改用那個時間點的 TLE 備份；null = 最新資料。切換在背景進行，換好之前繼續用舊的。
@@ -77,6 +93,55 @@ export class StarlinkLayer {
   disable() {
     this.enabled = false;
     if (this.points) this.points.visible = false;
+    for (const m of this.models) m.visible = false;
+  }
+
+  // 每一幀在 update() 之後呼叫：把離鏡頭最近、在畫面內的星鏈畫成 3D 模型。
+  updateModels(camera, viewPx, sunDir) {
+    let used = 0;
+    if (this.enabled && this.points?.visible) {
+      camera.updateMatrixWorld();
+      frustum.setFromProjectionMatrix(projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+      const p = this.points.geometry.attributes.position.array, v = this.base.vel;
+      const c = camera.position, r2 = MODEL_RANGE * MODEL_RANGE;
+      const near = this.near;
+      near.length = 0;
+      for (let k = 0; k < p.length; k += 3) {
+        const dx = p[k] - c.x, dy = p[k + 1] - c.y, dz = p[k + 2] - c.z;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > r2 || !frustum.containsPoint(vP.set(p[k], p[k + 1], p[k + 2]))) continue;
+        near.push([d2, k]);
+      }
+      near.sort((a, b) => a[0] - b[0]);
+      const tanHalf = Math.tan((camera.fov * DEG) / 2);
+      for (const [d2, k] of near) {
+        if (used >= MODEL_MAX) break;
+        const d = Math.sqrt(d2);
+        const px = Math.min(MODEL_PX, (MODEL_PX * MODEL_REF_KM) / EARTH_KM / d);
+        if (px < MODEL_MIN_PX) break;
+        let m = this.models[used];
+        if (!m) {
+          m = makeSatModel('starlink');
+          this.models.push(m);
+          this.scene.add(m);
+        }
+        used++;
+        m.position.set(p[k], p[k + 1], p[k + 2]);
+        vUp.copy(m.position).normalize();
+        vFwd.set(v[k], v[k + 1], v[k + 2]);
+        vFwd.addScaledVector(vUp, -vFwd.dot(vUp)).normalize();
+        vRight.crossVectors(vUp, vFwd);
+        m.quaternion.setFromRotationMatrix(basis.makeBasis(vRight, vUp, vFwd));
+        const worldPerPx = (2 * d * tanHalf) / viewPx;
+        m.scale.setScalar(Math.max(px * worldPerPx, MODEL_REAL));
+        // 地球陰影（圓柱模型）
+        const s = m.position.dot(sunDir);
+        setModelLit(m, s > 0 || vP.copy(m.position).addScaledVector(sunDir, -s).lengthSq() > 1);
+        m.visible = true;
+      }
+    }
+    for (let i = used; i < this.models.length; i++) this.models[i].visible = false;
+    this.modelCount = used;
   }
 
   onMessage(msg) {

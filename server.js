@@ -322,6 +322,61 @@ async function getClouds() {
   return clouds;
 }
 
+// 台灣高解析影像圖塊：白天是 EOX Sentinel-2 cloudless（CC BY-NC-SA 4.0，要標示出處，不能商用），
+// 夜晚燈光是 NASA Black Marble（EOX 轉成 WMS；原始約 500 m，所以只做到 nightMaxZ 層）。
+// 117.75–122.75°E、21.5–26.5°N 這個 5° 見方切成四分樹，第 z 層每邊 2^z 塊，每塊 512×512，
+// 經緯度方格（EPSG:4326），y 從南邊數。第一次要的時候才向 EOX WMS 下載，存在資料資料夾，之後直接讀檔。
+const TW_TILES = {
+  west: 117.75, south: 21.5, size: 5, maxZ: 6, px: 512, layer: 's2cloudless-2025',
+  nightLayer: 'blackmarble', nightMaxZ: 2,
+  credit: 'EOxCloudless 2025 © EOX IT Services GmbH（含修改過的 Copernicus Sentinel 2025 資料），CC BY-NC-SA 4.0；夜間燈光：NASA Black Marble',
+  creditUrl: 'https://cloudless.eox.at',
+};
+const TW_TILE_ROOT = path.join(CACHE_DIR, 'tw-tiles');
+const TW_MAX_FETCH = 4; // 同時向 EOX 下載幾塊
+const twInFlight = new Map();
+const twWaiting = [];
+let twFetching = 0;
+function twSlot() {
+  if (twFetching < TW_MAX_FETCH) { twFetching++; return Promise.resolve(); }
+  return new Promise((resolve) => twWaiting.push(resolve));
+}
+function twRelease() {
+  const next = twWaiting.shift();
+  if (next) next(); else twFetching--;
+}
+async function fetchTwTile(layer, z, x, y, file) {
+  await twSlot();
+  try {
+    const d = TW_TILES.size / 2 ** z;
+    const w = TW_TILES.west + x * d, s = TW_TILES.south + y * d;
+    const url = 'https://tiles.maps.eox.at/wms?SERVICE=WMS&REQUEST=GetMap&VERSION=1.1.1&STYLES=&SRS=EPSG:4326&FORMAT=image/jpeg'
+      + `&LAYERS=${layer}&BBOX=${w},${s},${w + d},${s + d}&WIDTH=${TW_TILES.px}&HEIGHT=${TW_TILES.px}`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(30e3) });
+    if (!r.ok || !(r.headers.get('content-type') || '').startsWith('image/jpeg')) throw new ApiError(502, '影像圖塊下載失敗');
+    const image = Buffer.from(await r.arrayBuffer());
+    await fs.promises.mkdir(path.dirname(file), { recursive: true });
+    await fs.promises.writeFile(`${file}.tmp`, image);
+    await fs.promises.rename(`${file}.tmp`, file);
+    return image;
+  } catch (err) {
+    throw err instanceof ApiError ? err : new ApiError(502, '影像圖塊下載失敗');
+  } finally {
+    twRelease();
+  }
+}
+async function getTwTile(layer, z, x, y) {
+  const file = path.join(TW_TILE_ROOT, layer, String(z), `${x}_${y}.jpg`);
+  try { return await fs.promises.readFile(file); } catch { /* 還沒下載 */ }
+  const key = `${layer}/${z}/${x}/${y}`;
+  if (!twInFlight.has(key)) {
+    const p = fetchTwTile(layer, z, x, y, file);
+    twInFlight.set(key, p);
+    p.then(() => twInFlight.delete(key), () => twInFlight.delete(key));
+  }
+  return twInFlight.get(key);
+}
+
 function sendJson(res, status, data) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(data));
@@ -346,7 +401,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method !== 'GET') { res.writeHead(405).end(); return; }
 
   if (pathname === '/api/config') {
-    sendJson(res, 200, { observer: OBSERVER, hasKey: Boolean(apiKey()), version: VERSION });
+    sendJson(res, 200, { observer: OBSERVER, hasKey: Boolean(apiKey()), version: VERSION, twTiles: TW_TILES });
     return;
   }
   if (pathname === '/api/starlink') {
@@ -390,6 +445,20 @@ const server = http.createServer(async (req, res) => {
         : { 'Content-Type': 'image/jpeg', 'Cache-Control': 'max-age=86400', 'X-Obs-Time': new Date(timeOfName(name)).toISOString() });
       res.end(data);
     });
+    return;
+  }
+  const twMatch = pathname.match(/^\/api\/twtile\/(day|night)\/(\d)\/(\d{1,2})\/(\d{1,2})\.jpg$/);
+  if (twMatch) {
+    const night = twMatch[1] === 'night';
+    const [z, x, y] = twMatch.slice(2).map(Number);
+    if (z > (night ? TW_TILES.nightMaxZ : TW_TILES.maxZ) || x >= 2 ** z || y >= 2 ** z) { sendJson(res, 400, { error: '圖塊編號不對' }); return; }
+    try {
+      const image = await getTwTile(night ? TW_TILES.nightLayer : TW_TILES.layer, z, x, y);
+      res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'max-age=604800' });
+      res.end(image);
+    } catch (err) {
+      sendJson(res, err.status || 500, { error: err.status ? err.message : '伺服器錯誤' });
+    }
     return;
   }
   const passMatch = pathname.match(/^\/api\/passes\/(radio|visual)\/(\d{1,6})$/);

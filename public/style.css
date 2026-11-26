@@ -159,6 +159,11 @@ body.replaying #replay-toggle { background: var(--accent); color: #17130a; font-
 #quota { margin: 8px 0 0; color: var(--muted); font-size: 12px; min-height: 1.45em; }
 
 #hint { position: fixed; left: 12px; bottom: 12px; margin: 0; color: var(--muted); font-size: 12px; max-width: calc(100vw - 350px); }
+#altitude { position: fixed; left: 12px; bottom: 32px; margin: 0; color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums; text-shadow: 0 1px 3px #000; }
+#altitude:empty { display: none; }
+#credit { position: fixed; right: calc(310px + 24px + 12px); bottom: 32px; margin: 0; font-size: 11px; max-width: 420px; text-align: right; }
+#credit a { color: var(--muted); text-decoration: none; }
+#credit a:hover { text-decoration: underline; }
 
 #notice {
   position: fixed; left: 50%; top: 50%;

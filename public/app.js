@@ -1,8 +1,13 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { makeSatModel, modelKind, setModelLit, disposeModel } from './models.js';
 import { StarlinkLayer } from './starlink.js';
 import { CloudLayer } from './clouds.js';
+import { TaiwanTiles } from './taiwan-tiles.js';
 
 const sgp4 = window.satellite;
 
@@ -54,9 +59,15 @@ scene.background = new THREE.Color(0x03050b);
 const camera = new THREE.PerspectiveCamera(45, 1, 0.05, 400);
 const controls = new OrbitControls(camera, canvas);
 controls.enablePan = false;
+// 按住滾輪拖曳也是移動地圖（和左鍵一樣），滾動滾輪仍然是縮放
+controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
 controls.enableDamping = true;
 controls.minDistance = 1.2;
 controls.maxDistance = 18;
+// 台灣附近可以拉近到離地 CLOSE_MIN_KM（有高解析圖塊），其他地方維持 FAR_MIN_KM；
+// 中間依相機離台灣多遠（度）漸變，所以轉離台灣時相機會慢慢升高
+const CLOSE_MIN_KM = 15, FAR_MIN_KM = 1274;
+const CLOSE_ZONE_DEG = 4, FAR_ZONE_DEG = 12;
 
 function placeholder(r, g, b) {
   const t = new THREE.DataTexture(new Uint8Array([r, g, b, 255]), 1, 1);
@@ -80,8 +91,17 @@ function loadInto(uniform, url) {
 loadInto(earthUniforms.dayMap, 'textures/earth_bluemarble_5400.jpg');
 loadInto(earthUniforms.nightMap, `${TEX}/earth_lights_2048.png`);
 
+// 日夜光影，地球和台灣高解析圖塊共用
+const EARTH_SHADE = `
+  vec3 shade(vec3 dayRgb, vec3 nightRgb, vec3 n) {
+    float d = dot(n, sunDir);
+    vec3 day = dayRgb * (0.3 + 0.85 * max(d, 0.0));
+    vec3 night = dayRgb * 0.13 + nightRgb;
+    return mix(night, day, smoothstep(-0.1, 0.12, d));
+  }`;
+
 const earth = new THREE.Mesh(
-  new THREE.SphereGeometry(1, 128, 96),
+  new THREE.SphereGeometry(1, 256, 192), // 拉近到幾十公里高時，地平線才不會看出多邊形
   new THREE.ShaderMaterial({
     uniforms: earthUniforms,
     vertexShader: `
@@ -90,11 +110,9 @@ const earth = new THREE.Mesh(
     fragmentShader: `
       uniform sampler2D dayMap, nightMap; uniform vec3 sunDir;
       varying vec2 vUv; varying vec3 vN;
+      ${EARTH_SHADE}
       void main() {
-        float d = dot(normalize(vN), sunDir);
-        vec3 day = texture2D(dayMap, vUv).rgb * (0.3 + 0.85 * max(d, 0.0));
-        vec3 night = texture2D(dayMap, vUv).rgb * 0.13 + texture2D(nightMap, vUv).rgb;
-        gl_FragColor = vec4(mix(night, day, smoothstep(-0.1, 0.12, d)), 1.0);
+        gl_FragColor = vec4(shade(texture2D(dayMap, vUv).rgb, texture2D(nightMap, vUv).rgb, normalize(vN)), 1.0);
       }`,
   }),
 );
@@ -138,12 +156,31 @@ function skyDirection(az, el, out = new THREE.Vector3()) {
     .addScaledVector(up, Math.sin(e));
 }
 
-// Simplified coastline, for orientation only.
-const TAIWAN_OUTLINE = [
-  [25.30, 121.56], [25.13, 121.92], [24.85, 121.83], [24.55, 121.87], [24.00, 121.62], [23.45, 121.48],
-  [22.80, 121.18], [22.35, 120.90], [21.90, 120.85], [22.05, 120.70], [22.48, 120.45], [22.65, 120.26],
-  [23.05, 120.08], [23.55, 120.12], [24.15, 120.47], [24.65, 120.75], [25.00, 121.03], [25.20, 121.30], [25.30, 121.56],
-];
+// 台灣海岸線（本島、澎湖、金門、綠島、蘭嶼…）：Natural Earth 1:10m（公有領域），tools/make-coastline.py 產生。
+// 一般的 THREE.Line 在 WebGL 只能畫 1 像素，所以用 Line2（寬度單位是像素，視窗大小改變時要更新 resolution）。
+const COAST_COLOR = 0x00ffff, COAST_WIDTH_PX = 2, COAST_ALT_KM = 1;
+const coastMaterial = new LineMaterial({ color: COAST_COLOR, linewidth: COAST_WIDTH_PX, transparent: true, depthWrite: false });
+async function loadCoastline() {
+  try {
+    const res = await fetch('taiwan-coast.json');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const v = new THREE.Vector3();
+    for (const ring of await res.json()) {
+      const pos = [];
+      for (const [la, ln] of ring) {
+        geoToVec(la, ln, COAST_ALT_KM, v);
+        pos.push(v.x, v.y, v.z);
+      }
+      const geo = new LineGeometry();
+      geo.setPositions(pos);
+      const l = new Line2(geo, coastMaterial);
+      l.computeLineDistances();
+      taiwanGroup.add(l);
+    }
+  } catch (err) {
+    console.warn('台灣海岸線載入失敗', err);
+  }
+}
 
 function line(points, color, opacity = 1) {
   return new THREE.Line(
@@ -157,8 +194,6 @@ function buildObserver() {
   const lam = observer.lng * DEG;
   east.set(-Math.sin(lam), 0, -Math.cos(lam));
   north.crossVectors(up, east);
-
-  taiwanGroup.add(line(TAIWAN_OUTLINE.map(([la, ln]) => geoToVec(la, ln, 3)), 0xffd166));
 
   const R = 30;
   const P = up.clone().multiplyScalar(1.0015);
@@ -190,6 +225,9 @@ const ringTexture = (() => {
 // Lights for the satellite models only; the Earth uses its own shader.
 const sunLight = new THREE.DirectionalLight(0xffffff, 2.6);
 scene.add(sunLight, new THREE.AmbientLight(0xffffff, 0.55));
+// 金屬外皮要有東西可以反射，不然只剩太陽的亮點、其他地方全黑。只影響衛星模型（地球、圖塊用自己的 shader）。
+scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.8;
 
 const MODEL_PX = 40, MODEL_PX_SELECTED = 60; // on-screen size of a model (longest side)
 const RING_MIN_PX = 16;
@@ -578,6 +616,7 @@ const compassLabels = [];
 let taiwanLabel;
 
 function homeSpace() {
+  tilt = heading = 0;
   camera.position.copy(up).multiplyScalar(3.4);
   controls.target.set(0, 0, 0);
   controls.update();
@@ -589,6 +628,7 @@ function setView(next) {
   const space = view === 'space';
   controls.enabled = space;
   atmosphere.visible = stars.visible = taiwanGroup.visible = space;
+  if (!space) taiwanTiles?.hideAll();
   skyGrid.visible = !space;
   camera.near = space ? 0.05 : 0.0005;
   camera.fov = space ? 45 : 70;
@@ -606,7 +646,7 @@ function setView(next) {
 }
 
 function updateHint() {
-  let text = '拖曳旋轉・滾輪縮放・彩色直線連接台灣與地平線上的衛星・點選清單可標示軌道';
+  let text = '拖曳移動・右鍵（或 Shift＋左鍵）拖曳斜看・滾輪縮放・彩色直線連接台灣與地平線上的衛星・點選清單可標示軌道';
   if (view === 'sky') {
     const known = [...sats.values()].filter((s) => s.state);
     text = known.length && !known.some((s) => s.state.el > 0)
@@ -694,6 +734,7 @@ function updateLabels() {
 function resize() {
   const w = window.innerWidth, h = window.innerHeight;
   renderer.setSize(w, h, false);
+  coastMaterial.resolution.set(w, h);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
 }
@@ -1062,7 +1103,7 @@ function pickGrid(clientX, clientY) {
 
 // 拖曳旋轉不算點擊：按下到放開移動不超過 5 像素才算
 let gridDown = null;
-canvas.addEventListener('pointerdown', (e) => { gridDown = { x: e.clientX, y: e.clientY }; });
+canvas.addEventListener('pointerdown', (e) => { gridDown = e.button === 0 && !e.shiftKey ? { x: e.clientX, y: e.clientY } : null; });
 canvas.addEventListener('pointerup', (e) => {
   if (!gridDown || Math.hypot(e.clientX - gridDown.x, e.clientY - gridDown.y) > 5) return;
   gridDown = null;
@@ -1204,11 +1245,90 @@ replayPos.addEventListener('input', () => {
   if (replay) setSim(replay.playing ? replay.speed : 0, Number(replayPos.value));
 });
 
+// 斜看（太空俯瞰）：OrbitControls 讓鏡頭永遠朝地心；每幀在 controls.update() 之後再轉。
+// heading = 朝向（0 = 北，正值往左轉），tilt = 從正下方往前抬起的角度。
+// 按住右鍵或 Shift＋左鍵拖曳：上下改 tilt、左右改 heading。高空時斜看沒有意義，可抬起的角度跟著變小。
+let tilt = 0, heading = 0, tiltDrag = null;
+const TILT_MAX = 88 * DEG, TILT_PER_PX = 0.25 * DEG;
+function maxTilt(altKm) {
+  return TILT_MAX * (1 - THREE.MathUtils.smoothstep(altKm, 3000, 8000));
+}
+canvas.addEventListener('pointerdown', (e) => {
+  if (view !== 'space' || !(e.button === 2 || (e.button === 0 && e.shiftKey))) return;
+  tiltDrag = { x: e.clientX, y: e.clientY, tilt, heading };
+  controls.enabled = false; // 不要同時轉動地球
+});
+window.addEventListener('pointermove', (e) => {
+  if (!tiltDrag) return;
+  const altKm = (camera.position.length() - 1) * EARTH_KM;
+  tilt = THREE.MathUtils.clamp(tiltDrag.tilt - (e.clientY - tiltDrag.y) * TILT_PER_PX, 0, maxTilt(altKm));
+  heading = tiltDrag.heading - (e.clientX - tiltDrag.x) * TILT_PER_PX;
+});
+window.addEventListener('pointerup', () => {
+  if (!tiltDrag) return;
+  tiltDrag = null;
+  controls.enabled = view === 'space';
+});
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+function applyTilt() {
+  const altKm = (camera.position.length() - 1) * EARTH_KM;
+  tilt = Math.min(tilt, maxTilt(altKm));
+  if (tilt === 0 && !tiltDrag) heading = 0;
+  if (heading) camera.rotateZ(heading);
+  if (tilt) camera.rotateX(tilt);
+  camera.updateMatrixWorld();
+}
+
+function renderAltitude() {
+  let text = '';
+  if (view === 'space') {
+    const altKm = (camera.position.length() - 1) * EARTH_KM;
+    text = `鏡頭高度 ${altKm < 100 ? altKm.toFixed(1) : Math.round(altKm).toLocaleString()} km`;
+    if (tilt > 0.5 * DEG) {
+      const az = ((-heading / DEG) % 360 + 360) % 360;
+      text += `・抬頭 ${Math.round(tilt / DEG)}°・朝${compassName(az)}（${Math.round(az)}°）`;
+    }
+  }
+  const el = $('altitude');
+  if (el.textContent !== text) el.textContent = text;
+}
+
+let taiwanTiles = null;
+const tilesCenter = new THREE.Vector3();
+// 太空俯瞰：依高度調整拉近範圍、縮放和旋轉速度、近裁切面
+function adjustSpaceCamera() {
+  const dist = camera.position.length(), alt = dist - 1;
+  const ang = Math.acos(THREE.MathUtils.clamp(camera.position.dot(tilesCenter) / dist, -1, 1)) / DEG;
+  const t = taiwanTiles ? THREE.MathUtils.smoothstep(ang, CLOSE_ZONE_DEG, FAR_ZONE_DEG) : 1;
+  controls.minDistance = 1 + (CLOSE_MIN_KM + (FAR_MIN_KM - CLOSE_MIN_KM) * t) / EARTH_KM;
+  // 滾輪每一格改變的距離和高度成正比；離地 1274 km 以上和以前一樣
+  controls.zoomSpeed = Math.min(1, (6 * alt) / dist);
+  // 拉近時拖曳要讓地面跟著滑鼠走：拖曳整個畫面高度 = 轉 2π × rotateSpeed，
+  // 畫面高度看到的地面約 2 × alt × tan(22.5°) = 0.83 × alt（弧度），所以 rotateSpeed ≈ 0.13 × alt。
+  // 拉遠時（alt > 約 1.4）回到 1
+  controls.rotateSpeed = Math.min(1, 0.132 * alt * (1 + 3 * alt));
+  const near = THREE.MathUtils.clamp(alt * 0.3, 2e-5, 0.05);
+  if (Math.abs(near - camera.near) > near * 0.2) {
+    camera.near = near;
+    camera.updateProjectionMatrix();
+  }
+  // 拉近到高解析影像看得清楚時，粗略的台灣輪廓線反而擋住海岸線
+  taiwanGroup.visible = alt > 400 / EARTH_KM;
+}
+
 function frame() {
   const ms = clockMs();
   for (const s of sats.values()) updateSat(s, ms);
   starlink.update(ms, up, sim ? Math.max(1, sim.speed) : 1);
-  if (view === 'space') controls.update(); else aimSky();
+  if (view === 'space') {
+    adjustSpaceCamera();
+    controls.update();
+    applyTilt();
+    taiwanTiles?.update();
+  } else aimSky();
+  renderAltitude();
+  starlink.updateModels(camera, canvas.clientHeight, earthUniforms.sunDir.value);
   updateLabels();
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
@@ -1241,6 +1361,18 @@ async function start() {
   if (config.version) $('version').textContent = `v${config.version}`;
   observerGd = { latitude: observer.lat * DEG, longitude: observer.lng * DEG, height: (observer.alt || 0) / 1000 };
   buildObserver();
+  if (config.twTiles) {
+    const tw = config.twTiles;
+    geoToVec(tw.south + tw.size / 2, tw.west + tw.size / 2, 0, tilesCenter);
+    const credit = $('credit');
+    const link = credit.querySelector('a');
+    link.textContent = `台灣影像：${tw.credit}`;
+    link.href = tw.creditUrl;
+    taiwanTiles = new TaiwanTiles({
+      scene, camera, renderer, geoToVec, earthUniforms, shadeGlsl: EARTH_SHADE, config: tw,
+      onCredit: (on) => { credit.hidden = !on; },
+    });
+  }
   taiwanLabel = makeLabel('place', observer.name);
   for (const [text, az] of [['北', 0], ['東', 90], ['南', 180], ['西', 270]]) {
     compassLabels.push({
@@ -1249,6 +1381,7 @@ async function start() {
     });
   }
   resize();
+  loadCoastline();
   homeSpace();
   savedSpacePos = camera.position.clone();
   const params = new URLSearchParams(location.search);
