@@ -50,8 +50,12 @@
       <span class="body-name" title="月亮在真實位置（約 38 萬公里外），亮面跟著太陽方向，看得出月相；這裡顯示從台灣看的仰角、方位和月相">月亮</span>
       <span id="moon-info"></span>
     </div>
-    <button id="solar-toggle" type="button" aria-pressed="false" title="太陽系示意：太陽在中心，八大行星和月亮的方向是真的（JPL 軌道根數），距離開根號縮放、大小放大。會自動開 10 萬倍加速模擬（地球約 5 分鐘繞太陽一圈），倍速最高 100 萬倍">太陽系</button>
-    <button id="spin-toggle" type="button" aria-pressed="false" title="改用太空固定的視角：星空和軌道平面不動，看到地球在底下自轉（每小時 15°，所以會自動開 200 倍加速模擬）。軌道線會變成閉合的橢圓">地球自轉</button>
+    <div class="segmented" role="group" aria-label="畫面">
+      <button id="earth-view" type="button" class="active" aria-pressed="true" title="回到地球畫面（以台灣為中心的衛星）">地球</button>
+      <button id="lunar-toggle" type="button" aria-pressed="false" title="月球視角：月球在中心，繞月衛星（LRO、Danuri、Chandrayaan-2、ARTEMIS P1／P2）、地球、太陽都在真實位置和大小（NASA JPL Horizons 星曆）。會自動開 60 倍加速模擬（LRO 約 2 分鐘繞一圈）">月球</button>
+      <button id="solar-toggle" type="button" aria-pressed="false" title="太陽系示意：太陽在中心，八大行星和月亮的方向是真的（JPL 軌道根數），距離開根號縮放、大小放大。會自動開 10 萬倍加速模擬（地球約 5 分鐘繞太陽一圈），倍速最高 100 萬倍">太陽系</button>
+    </div>
+    <button id="spin-toggle" type="button" aria-pressed="false" title="改用太空固定的視角：星空不動，看得到天體自轉。地球畫面：地球每小時轉 15°（自動開 200 倍加速模擬），軌道線變成閉合的橢圓。月球畫面：月球 27.3 天轉一圈、地球一天一圈（自動開最高的 10000 倍，月球約 4 分鐘轉一圈）；關掉時鏡頭跟著月球轉，月球看起來不動">自轉</button>
     <button id="grid-toggle" type="button" aria-pressed="false" title="顯示經緯線（每 15° 一條虛線，赤道和本初子午線較亮）">經緯線</button>
     <button id="replay-toggle" type="button" disabled>回放</button>
     <div class="sim">
@@ -71,6 +75,7 @@
     <section id="tab-list" class="tab" role="tabpanel">
       <p class="tab-head"><span id="count"></span></p>
       <ul id="list"></ul>
+      <ul id="lunar-list" hidden></ul>
       <form id="add">
         <input id="add-id" placeholder="NORAD 編號或名稱" aria-label="NORAD 編號或名稱" autocomplete="off" required
           role="combobox" aria-controls="add-menu" aria-expanded="false" aria-autocomplete="list">

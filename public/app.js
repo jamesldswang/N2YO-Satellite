@@ -13,6 +13,7 @@ import { makeTail, setTailPoints, disposeTail, tailResolution, TAIL_POINTS } fro
 import { SunMoon, phaseName } from './sun-moon.js';
 import { TaiwanTiles } from './taiwan-tiles.js';
 import { SolarSystem } from './solar-system.js';
+import { LunarView, LUNAR_INFO } from './lunar.js';
 
 const sgp4 = window.satellite;
 
@@ -243,6 +244,9 @@ let view = 'space';
 let spin = false; // 地球自轉模式（見 setSpin）
 let solar = null;  // 太陽系示意模式（SolarSystem，見 setSolar）
 const solarOn = () => Boolean(solar?.on);
+let lunar = null;  // 月球視角（LunarView，見 setLunar）
+const lunarOn = () => Boolean(lunar?.on);
+const otherView = () => solarOn() || lunarOn(); // 地球畫面整個被換掉（太陽系或月球視角）
 let polling = false;
 
 function makeLabel(className, text) {
@@ -591,10 +595,14 @@ satTip.hidden = true;
 document.body.append(satTip);
 function showSatTip(s, rowEl) {
   const info = satInfo(s);
+  showInfoTip({ ...info, title: info.title || `NORAD ${s.id}`, facts: [`NORAD ${s.id}`, ...info.facts] }, rowEl);
+}
+// info：{ title, kind, text, facts }（facts 是字串陣列）
+function showInfoTip(info, rowEl) {
   const head = document.createElement('div');
   head.className = 'tip-head';
   const title = document.createElement('strong');
-  title.textContent = info.title || `NORAD ${s.id}`;
+  title.textContent = info.title;
   head.append(title);
   if (info.kind) {
     const kind = document.createElement('span');
@@ -606,7 +614,7 @@ function showSatTip(s, rowEl) {
   text.textContent = info.text;
   const facts = document.createElement('div');
   facts.className = 'tip-facts';
-  facts.textContent = [`NORAD ${s.id}`, ...info.facts].join(' · ');
+  facts.textContent = info.facts.join(' · ');
   satTip.replaceChildren(head, text, facts);
   satTip.hidden = false;
   const row = rowEl.getBoundingClientRect();
@@ -788,6 +796,7 @@ let taiwanLabel;
 let camFly = null;
 function flyTo(dir, altKm) {
   if (solarOn()) setSolar(false);
+  if (lunarOn()) setLunar(false);
   if (view !== 'space') setView('space');
   const from = camera.position.clone();
   camFly = {
@@ -850,7 +859,11 @@ function setView(next) {
 
 function updateHint() {
   let text = '拖曳移動・右鍵（或 Shift＋左鍵）拖曳斜看・滾輪縮放・彩色直線連接台灣與地平線上的衛星・點選清單可標示軌道';
-  if (solarOn()) {
+  if (lunarOn()) {
+    text = `月球視角：拖曳旋轉・右鍵拖曳平移・滾輪縮放・月球、衛星、地球都是真實位置和大小（NASA JPL Horizons 星曆）・${spin ? '自轉：星空固定，看得到月球和地球自轉' : '鏡頭跟著月球轉（按「自轉」看月球和地球自轉）'}`;
+    const extra = [lunar.status, ...lunar.missing(clockMs())].filter(Boolean);
+    if (extra.length) text += `・${extra.join('・')}`;
+  } else if (solarOn()) {
     text = '太陽系示意：拖曳旋轉・右鍵拖曳平移・滾輪縮放・方向是真的；距離開根號縮放、大小放大（不是真實比例）';
   } else if (view === 'sky') {
     const known = [...sats.values()].filter((s) => s.state);
@@ -871,7 +884,7 @@ $('reset').addEventListener('click', () => {
 
 let drag = null;
 canvas.addEventListener('pointerdown', (e) => {
-  if (view !== 'sky' || solarOn()) return;
+  if (view !== 'sky' || otherView()) return;
   drag = { x: e.clientX, y: e.clientY };
   canvas.setPointerCapture(e.pointerId);
 });
@@ -886,7 +899,7 @@ const endDrag = () => { drag = null; };
 canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', endDrag);
 canvas.addEventListener('wheel', (e) => {
-  if (view !== 'sky' || solarOn()) return;
+  if (view !== 'sky' || otherView()) return;
   e.preventDefault();
   camera.fov = THREE.MathUtils.clamp(camera.fov * (e.deltaY > 0 ? 1.08 : 0.92), 20, 100);
   camera.updateProjectionMatrix();
@@ -951,6 +964,7 @@ function resize() {
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   solar?.resize(w, h);
+  lunar?.resize(w, h);
 }
 window.addEventListener('resize', resize);
 
@@ -1171,7 +1185,7 @@ function tickSlow() {
   // 軌道線每 30 秒（模擬時間）重算；高倍速時改成約每 0.15 秒真實時間一次，1000 倍時才不會每一幀都重算
   const pathEvery = Math.max(30000, (sim ? sim.speed : 1) * 150);
   // 太陽系模式看不到地球畫面，而且倍速可到 100 萬：軌道線、過境預報、回放資料都先不算，回到地球畫面時再算
-  const earthShown = !solarOn();
+  const earthShown = !otherView();
   for (const s of sats.values()) {
     if (earthShown && Math.abs(nowMs - s.pathAt) >= pathEvery) { updatePath(s, nowMs); s.pathAt = nowMs; }
   }
@@ -1185,6 +1199,7 @@ function tickSlow() {
   renderCloudInfo();
   renderWeatherInfo();
   renderSunMoonInfo();
+  if (lunarOn()) renderLunarList();
 }
 
 // Starlink layer: off by default; the choice is remembered in this browser.
@@ -1302,7 +1317,7 @@ canvas.addEventListener('pointerup', (e) => {
   const down = weatherDown;
   weatherDown = null;
   if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return;
-  if (!weather.enabled || view !== 'space' || solarOn()) return;
+  if (!weather.enabled || view !== 'space' || otherView()) return;
   const st = weather.pick(e.clientX, e.clientY);
   const target = st ? geoToVec(st.lat, st.lon, 0) : earthPointAt(e.clientX, e.clientY);
   if (!target) return;
@@ -1361,7 +1376,7 @@ canvas.addEventListener('pointermove', (e) => { hoverXY = e.buttons ? null : { x
 canvas.addEventListener('pointerleave', () => { hoverXY = null; });
 // 每幀呼叫：鏡頭飛行、回放換時間時，游標下的測站和資料也會變，不能只在滑鼠移動時判斷
 function updateStationTip() {
-  const st = hoverXY && weather.enabled && view === 'space' && !solarOn() ? weather.pick(hoverXY.x, hoverXY.y) : null;
+  const st = hoverXY && weather.enabled && view === 'space' && !otherView() ? weather.pick(hoverXY.x, hoverXY.y) : null;
   const cursor = st ? 'pointer' : '';
   if (canvas.style.cursor !== cursor) canvas.style.cursor = cursor;
   if (!st) {
@@ -1482,7 +1497,7 @@ function pickGrid(clientX, clientY) {
 
 // 拖曳旋轉不算點擊：按下到放開移動不超過 5 像素才算
 let gridDown = null;
-canvas.addEventListener('pointerdown', (e) => { gridDown = e.button === 0 && !e.shiftKey && !solarOn() ? { x: e.clientX, y: e.clientY } : null; });
+canvas.addEventListener('pointerdown', (e) => { gridDown = e.button === 0 && !e.shiftKey && !otherView() ? { x: e.clientX, y: e.clientY } : null; });
 canvas.addEventListener('pointerup', (e) => {
   if (!gridDown || Math.hypot(e.clientX - gridDown.x, e.clientY - gridDown.y) > 5) return;
   gridDown = null;
@@ -1551,6 +1566,20 @@ function setSpin(on) {
   for (const s of sats.values()) s.pathAt = -Infinity;
   $('spin-toggle').setAttribute('aria-pressed', String(on));
   try { localStorage.setItem(SPIN_KEY, on ? '1' : '0'); } catch { /* optional */ }
+  if (lunar) lunar.spin = on;
+  // 月球視角：月球 27.3 天才轉一圈，倍速低時看不出來，打開時一律拉到 LUNAR_SPIN_SPEED 倍；
+  // 關掉時還是那個倍速就回到打開前的倍速
+  if (lunarOn()) {
+    if (on) raiseLunarSpinSpeed();
+    else if (sim && !replay && sim.speed === LUNAR_SPIN_SPEED) {
+      const back = lunarSpinPrev ?? LUNAR_SIM_SPEED;
+      simSpeed.value = sliderFor(back);
+      setSim(back);
+    }
+    spinStartedSim = false;
+    tickSlow();
+    return;
+  }
   if (on && !sim && !replay) {
     spinPrevSpeed = simSpeed.value;
     simSpeed.value = sliderFor(SPIN_SIM_SPEED);
@@ -1623,12 +1652,13 @@ const SOLAR_SIM_SPEED = 1e5;
 let solarStartedSim = false, solarPrevSpeed = null; // 自動開加速前滑桿的倍速
 function setSolar(on) {
   if (on === solarOn()) return;
+  if (on && lunarOn()) setLunar(false);
   solar ??= new SolarSystem(canvas, earthUniforms.dayMap);
   solar.setOn(on);
   resize();
   controls.enabled = !on && view === 'space';
   document.body.classList.toggle('solar', on);
-  $('solar-toggle').setAttribute('aria-pressed', String(on));
+  updateSceneButtons();
   if (on) {
     setSimMax(SOLAR_MAX_SPEED);
     if (!replay && (!sim || (spin && spinStartedSim && sim.speed === SPIN_SIM_SPEED))) {
@@ -1655,6 +1685,139 @@ function setSolar(on) {
   tickSlow();
 }
 $('solar-toggle').addEventListener('click', () => setSolar(!solarOn()));
+
+// 月球視角（lunar.js）：獨立的場景和鏡頭，月球在中心，繞月衛星、地球、太陽在真實位置。
+// LRO 等低軌道衛星約 2 小時繞一圈，所以還在即時的話自動開 LUNAR_SIM_SPEED 倍（約 2 分鐘一圈）；
+// 退出時如果倍速還是這裡開的就回到即時。
+// 月球視角的追蹤清單：比照地球的清單（點一下標示軌道、滑鼠停留看簡介），列出繞月衛星，依高度排序。
+// 右邊的「仰角」欄改成離月面高度；看得到地球（沒被月球擋住、可以和地球通訊）時顯示綠色。
+const lunarRows = new Map(); // id -> { el, name, elev, sub }
+function lunarRow(id, color) {
+  const el = document.createElement('li');
+  el.className = 'row';
+  el.tabIndex = 0;
+  const dot = document.createElement('span');
+  dot.className = 'dot';
+  dot.style.background = color;
+  const name = document.createElement('span');
+  name.className = 'name';
+  const elev = document.createElement('span');
+  elev.className = 'elev';
+  const pad = document.createElement('span'); // 地球清單的「×」那一欄
+  const sub = document.createElement('span');
+  sub.className = 'sub';
+  el.append(dot, name, elev, pad, sub);
+  const pick = () => { lunar.select(id); renderLunarList(); };
+  el.addEventListener('click', pick);
+  el.addEventListener('keydown', (e) => { if (e.key === 'Enter') pick(); });
+  const tip = () => {
+    const i = LUNAR_INFO[id];
+    showInfoTip({ ...i, facts: [`NORAD ${i.norad}`, ...i.facts, '位置：NASA JPL Horizons'] }, el);
+  };
+  el.addEventListener('mouseenter', tip);
+  el.addEventListener('focus', tip);
+  el.addEventListener('mouseleave', hideSatTip);
+  el.addEventListener('blur', hideSatTip);
+  const row = { el, name, elev, sub };
+  lunarRows.set(id, row);
+  return row;
+}
+// tickSlow 每 250 毫秒呼叫（只在月球視角）
+function renderLunarList() {
+  const list = lunar.listInfo(clockMs());
+  list.forEach((x, i) => {
+    const row = lunarRows.get(x.id) || lunarRow(x.id, x.color);
+    if ($('lunar-list').children[i] !== row.el) $('lunar-list').insertBefore(row.el, $('lunar-list').children[i] || null);
+    row.el.classList.toggle('selected', lunar.selected === x.id);
+    if (row.name.textContent !== x.name) row.name.textContent = x.name;
+    if (x.shown) {
+      row.elev.textContent = `${Math.round(x.alt).toLocaleString()} km`;
+      row.elev.classList.toggle('up', x.seesEarth);
+      const per = x.period >= 7200 ? `${(x.period / 3600).toFixed(1)} 小時` : `${Math.round(x.period / 60)} 分鐘`;
+      row.sub.textContent = `週期 ${per} · 速度 ${x.speed.toFixed(2)} km/s · ${x.seesEarth ? '看得到地球' : '在月球背後（和地球斷訊）'}`;
+    } else {
+      row.elev.textContent = '';
+      row.elev.classList.remove('up');
+      row.sub.textContent = x.error;
+    }
+    row.sub.classList.toggle('err', !x.shown && x.error !== '載入中…');
+  });
+  const n = list.filter((x) => x.shown).length;
+  $('count').textContent = `繞月衛星 ${n} 顆，依高度排序（綠色 = 看得到地球）`;
+}
+
+// 上方的「地球｜月球｜太陽系」切換：目前的畫面亮起來
+function updateSceneButtons() {
+  const cur = lunarOn() ? 'lunar' : solarOn() ? 'solar' : 'earth';
+  for (const [id, key] of [['earth-view', 'earth'], ['lunar-toggle', 'lunar'], ['solar-toggle', 'solar']]) {
+    $(id).classList.toggle('active', cur === key);
+    $(id).setAttribute('aria-pressed', String(cur === key));
+  }
+}
+$('earth-view').addEventListener('click', () => { setSolar(false); setLunar(false); updateSceneButtons(); });
+
+// 自轉時用最高倍速 10000 倍：月球約 3.9 分鐘轉一圈（每秒 1.5°）、地球約 8.6 秒一圈、LRO 約 0.7 秒繞一圈
+const LUNAR_SIM_SPEED = 60, LUNAR_SPIN_SPEED = SIM_MAX_SPEED;
+let lunarSpinPrev = null; // 自轉拉到最高倍速之前的倍速
+function raiseLunarSpinSpeed() {
+  if (replay || (sim && sim.speed >= LUNAR_SPIN_SPEED)) return;
+  lunarSpinPrev = sim ? sim.speed : null;
+  simSpeed.value = sliderFor(LUNAR_SPIN_SPEED);
+  setSim(LUNAR_SPIN_SPEED);
+}
+let lunarStartedSim = false, lunarPrevSlider = null;
+function setLunar(on) {
+  if (on === lunarOn()) return;
+  if (on && solarOn()) setSolar(false);
+  lunar ??= new LunarView(canvas, earthUniforms.dayMap, TEX);
+  lunar.spin = spin;
+  lunar.setOn(on);
+  resize();
+  controls.enabled = !on && view === 'space';
+  document.body.classList.toggle('lunar', on);
+  updateSceneButtons();
+  // 追蹤清單換成繞月衛星；過境預報、加入衛星是地球的功能，先藏起來
+  $('list').hidden = $('add').hidden = $('quota').hidden = on;
+  $('lunar-list').hidden = !on;
+  document.querySelector('[data-tab="passes"]').hidden = on;
+  if (on && passTab) setTab('list');
+  hideSatTip();
+  if (on) renderLunarList(); else renderCount();
+  if (on) {
+    // 還在即時（或是地球自轉自動開的 200 倍）就改成月球用的倍速
+    const auto = !sim || (spin && spinStartedSim && sim.speed === SPIN_SIM_SPEED);
+    if (!replay && auto) {
+      const speed = spin ? LUNAR_SPIN_SPEED : LUNAR_SIM_SPEED;
+      lunarSpinPrev = LUNAR_SIM_SPEED;
+      lunarPrevSlider = sim ? spinPrevSpeed : simSpeed.value; // 地球自轉自動開的倍速之前，滑桿原本的位置
+      simSpeed.value = sliderFor(speed);
+      setSim(speed);
+      lunarStartedSim = true;
+    }
+    if (spin) raiseLunarSpinSpeed(); // 已經在加速模擬但倍速太低時也拉上去
+  } else {
+    const back = lunarStartedSim && sim && !replay && (sim.speed === LUNAR_SIM_SPEED || sim.speed === LUNAR_SPIN_SPEED);
+    lunarStartedSim = false;
+    if (back) {
+      // 回到地球畫面：自轉開著就回自轉用的 200 倍，不然回到即時
+      if (spin) {
+        spinPrevSpeed = lunarPrevSlider;
+        simSpeed.value = sliderFor(SPIN_SIM_SPEED);
+        setSim(SPIN_SIM_SPEED);
+        spinStartedSim = true;
+      } else {
+        if (lunarPrevSlider !== null) simSpeed.value = lunarPrevSlider;
+        setSim(null);
+      }
+    }
+    for (const s of sats.values()) s.pathAt = -Infinity;
+    spinLast = null;
+    markPassesDirty();
+  }
+  updateHint();
+  tickSlow();
+}
+$('lunar-toggle').addEventListener('click', () => setLunar(!lunarOn()));
 
 // ---------- 回放 ----------
 // 用伺服器記錄的歷史資料（雲圖每 10 分鐘一張、保留 24 小時；星鏈 TLE 每 2.5 小時一份、保留 30 天），
@@ -1789,7 +1952,7 @@ function maxTilt(altKm) {
   return TILT_MAX * (1 - THREE.MathUtils.smoothstep(altKm, 3000, 8000));
 }
 canvas.addEventListener('pointerdown', (e) => {
-  if (view !== 'space' || solarOn() || !(e.button === 2 || (e.button === 0 && e.shiftKey))) return;
+  if (view !== 'space' || otherView() || !(e.button === 2 || (e.button === 0 && e.shiftKey))) return;
   tiltDrag = { x: e.clientX, y: e.clientY, tilt, heading };
   controls.enabled = false; // 不要同時轉動地球
 });
@@ -1802,7 +1965,7 @@ window.addEventListener('pointermove', (e) => {
 window.addEventListener('pointerup', () => {
   if (!tiltDrag) return;
   tiltDrag = null;
-  controls.enabled = view === 'space' && !solarOn();
+  controls.enabled = view === 'space' && !otherView();
 });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
@@ -1857,9 +2020,22 @@ function adjustSpaceCamera() {
 
 function frame() {
   const ms = clockMs();
+  // 太陽系、月球視角看不到地球畫面，但右邊清單的仰角、方位還是要更新
+  // 上方太陽、月亮的仰角方位也一樣
+  if (otherView()) {
+    updateSun(ms);
+    for (const s of sats.values()) updateSat(s, ms);
+    sunMoon.update(ms, earthUniforms.sunDir.value, camera, canvas.clientHeight, view === 'sky');
+  }
   if (solarOn()) {
     solar.update(ms);
     renderer.render(solar.scene, solar.camera);
+    requestAnimationFrame(frame);
+    return;
+  }
+  if (lunarOn()) {
+    lunar.update(ms);
+    renderer.render(lunar.scene, lunar.camera);
     requestAnimationFrame(frame);
     return;
   }
@@ -1957,6 +2133,7 @@ async function start() {
   try { spinOn ||= localStorage.getItem(SPIN_KEY) === '1'; } catch { /* optional */ }
   if (spinOn) setSpin(true);
   if (params.get('solar') === '1') setSolar(true);
+  if (params.get('lunar') === '1') setLunar(true);
   updateReplayButton();
 
   loadIds().forEach(createSat);

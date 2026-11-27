@@ -505,6 +505,80 @@ async function getTwTile(layer, z, x, y) {
   return twInFlight.get(key);
 }
 
+// ---------- 月球視角：NASA JPL Horizons 的月心星曆 ----------
+// 繞月衛星不能用 TLE／SGP4（那是繞地球的模型），改用 Horizons 的向量表：月球中心（500@301）、
+// J2000 黃道座標（km、km/s），每 10 分鐘一筆、含速度（前端用 Hermite 內插）。地球、太陽也一起抓，座標系才一致。
+// 一次抓 LUNAR_BLOCK_DAYS 天（從 1970-01-01 起每 4 天一段，對齊段落才能共用快取；10000 倍時一天只要 8.6 秒，
+// 一天一段會來不及、也打太多次 Horizons），快取 6 小時；不用金鑰。
+const HORIZONS = 'https://ssd.jpl.nasa.gov/api/horizons.api';
+const LUNAR_BODIES = [
+  { id: '-85', name: 'LRO', kind: 'sat' },              // NASA 月球勘測軌道器
+  { id: '-155', name: 'Danuri', kind: 'sat' },          // 韓國 KPLO
+  { id: '-152', name: 'Chandrayaan-2', kind: 'sat' },   // 印度
+  { id: '-192', name: 'ARTEMIS P1', kind: 'sat' },      // THEMIS-B
+  { id: '-193', name: 'ARTEMIS P2', kind: 'sat' },      // THEMIS-C
+  { id: '399', name: '地球', kind: 'earth' },
+  { id: '10', name: '太陽', kind: 'sun' },
+];
+const LUNAR_STEP_MIN = 10;
+const LUNAR_BLOCK_DAYS = 4;
+const lunarBlockStart = (day) => {
+  const n = Math.floor(Date.parse(`${day}T00:00:00Z`) / 864e5);
+  return new Date((n - (((n % LUNAR_BLOCK_DAYS) + LUNAR_BLOCK_DAYS) % LUNAR_BLOCK_DAYS)) * 864e5).toISOString().slice(0, 10);
+};
+const LUNAR_TTL = 6 * 3600e3;
+const TDB_MINUS_UTC_MS = 69184; // TT − UTC = 32.184 + 37 閏秒；TDB 和 TT 差不到 2 毫秒
+
+async function horizonsVectors(body, day) {
+  const next = new Date(Date.parse(`${day}T00:00:00Z`) + LUNAR_BLOCK_DAYS * 864e5).toISOString().slice(0, 10);
+  const u = new URL(HORIZONS);
+  const q = {
+    format: 'json', COMMAND: `'${body.id}'`, EPHEM_TYPE: 'VECTORS', CENTER: "'500@301'",
+    START_TIME: `'${day} 00:00'`, STOP_TIME: `'${next} 00:00'`, STEP_SIZE: `'${LUNAR_STEP_MIN}m'`,
+    OBJ_DATA: 'NO', REF_PLANE: 'ECLIPTIC', REF_SYSTEM: 'ICRF', VEC_TABLE: '2', VEC_CORR: 'NONE',
+    OUT_UNITS: 'KM-S', CSV_FORMAT: 'YES',
+  };
+  for (const [k, v] of Object.entries(q)) u.searchParams.set(k, v);
+  let json;
+  for (let attempt = 0; !json; attempt++) {
+    try {
+      const res = await fetch(u, { signal: AbortSignal.timeout(30000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      json = await res.json();
+    } catch (err) {
+      if (attempt >= 1) throw new Error(`無法連到 JPL Horizons（${err.message}）`);
+      await new Promise((r) => setTimeout(r, 1500)); // Horizons 忙碌時（503）稍等再試一次
+    }
+  }
+  const text = String(json.result || json.error || '');
+  const m = text.match(/\$\$SOE([\s\S]*?)\$\$EOE/);
+  if (!m) return { id: body.id, name: body.name, kind: body.kind, error: /No ephemeris/i.test(text) ? '這段時間沒有星曆' : '星曆格式不符' };
+  const rows = m[1].trim().split('\n').map((l) => l.split(',').map((x) => x.trim()));
+  const t0 = (Number(rows[0][0]) - 2440587.5) * 864e5 - TDB_MINUS_UTC_MS;
+  const data = [];
+  for (const r of rows) for (let k = 2; k < 8; k++) data.push(Math.round(Number(r[k]) * 1e6) / 1e6);
+  if (data.some((v) => !Number.isFinite(v))) return { id: body.id, name: body.name, kind: body.kind, error: '星曆格式不符' };
+  return { id: body.id, name: body.name, kind: body.kind, t0: Math.round(t0), step: LUNAR_STEP_MIN * 60e3, data };
+}
+
+// day 可以是段落裡的任何一天，回傳整段（start = 段落第一天）
+function getLunarDay(anyDay) {
+  const day = lunarBlockStart(anyDay);
+  return cached(`lunar:${day}`, LUNAR_TTL, async () => {
+    const bodies = [];
+    // 一個一個抓：Horizons 同一個 IP 同時多個請求會回 503
+    for (const b of LUNAR_BODIES) {
+      try {
+        bodies.push(await horizonsVectors(b, day));
+      } catch (err) {
+        bodies.push({ id: b.id, name: b.name, kind: b.kind, error: err.message });
+      }
+    }
+    if (bodies.every((b) => b.error)) throw Object.assign(new Error('JPL Horizons 沒有回傳資料'), { status: 502 });
+    return { start: day, days: LUNAR_BLOCK_DAYS, bodies };
+  });
+}
+
 function sendJson(res, status, data) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(data));
@@ -568,6 +642,17 @@ const server = http.createServer(async (req, res) => {
       clouds: listHistory(CLOUDS_HISTORY_DIR, '.jpg'),
       weather: listWeatherDays(),
     });
+    return;
+  }
+  const lunarMatch = pathname.match(/^\/api\/lunar\/(\d{4}-\d{2}-\d{2})$/);
+  if (lunarMatch) {
+    const t = Date.parse(`${lunarMatch[1]}T00:00:00Z`);
+    if (!Number.isFinite(t) || Math.abs(t - Date.now()) > 400 * 864e5) { sendJson(res, 400, { error: '日期超出範圍' }); return; }
+    try {
+      sendJson(res, 200, await getLunarDay(lunarMatch[1]));
+    } catch (err) {
+      sendJson(res, err.status || 502, { error: err.status ? err.message : (err.message || '伺服器錯誤') });
+    }
     return;
   }
   const weatherMatch = pathname.match(/^\/api\/weather\/history\/(\d{4}-\d{2}-\d{2})$/);

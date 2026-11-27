@@ -34,8 +34,12 @@ button:hover { background: rgba(255, 255, 255, .13); }
 
 #scene { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
 
-#labels, #solar-labels { position: fixed; inset: 0; overflow: hidden; pointer-events: none; }
-body.solar #labels, body.solar #altitude { display: none; }
+#labels, #solar-labels, #lunar-labels { position: fixed; inset: 0; overflow: hidden; pointer-events: none; }
+body.solar #labels, body.solar #altitude, body.lunar #labels, body.lunar #altitude { display: none; }
+.label.lunar-label { margin: -9px 0 0 0; pointer-events: none; cursor: default; color: #c9d3e0; text-shadow: 0 0 3px #000, 0 0 6px #000; }
+.label.lunar-label.sun { color: #ffd76a; }
+.label.lunar-label.earth { color: #8fc0ff; font-weight: 600; }
+.label.lunar-label.selected { color: #17130a !important; text-shadow: none; }
 .label.solar-label { margin: -9px 0 0 0; pointer-events: none; cursor: default; color: #c9d3e0; }
 .label.solar-label.sun { color: #ffd76a; }
 .label.solar-label.earth { color: #8fc0ff; font-weight: 600; }
@@ -73,12 +77,13 @@ body.solar #labels, body.solar #altitude { display: none; }
 .segmented button { border-radius: 0; }
 .segmented button:first-child { border-radius: 6px 0 0 6px; }
 .segmented button:last-child { border-radius: 0 6px 6px 0; border-left: 0; }
+.segmented button + button:not(:last-child) { border-left: 0; }
 .segmented button.active { background: var(--accent); color: #17130a; font-weight: 600; }
 #clock.sim { color: var(--accent); }
 .starlink { display: flex; align-items: center; gap: 8px; }
 #starlink-toggle[aria-pressed="true"] { background: #d9f1ff; color: #0b1622; font-weight: 600; }
 #clouds-toggle[aria-pressed="true"] { background: #eef2f6; color: #0b1622; font-weight: 600; }
-#grid-toggle[aria-pressed="true"], #spin-toggle[aria-pressed="true"], #weather-toggle[aria-pressed="true"], #solar-toggle[aria-pressed="true"] { background: #eef2f6; color: #0b1622; font-weight: 600; }
+#grid-toggle[aria-pressed="true"], #spin-toggle[aria-pressed="true"], #weather-toggle[aria-pressed="true"] { background: #eef2f6; color: #0b1622; font-weight: 600; }
 #clouds-info.stale, #weather-info.stale { color: var(--accent); }
 #clouds-info.forecast { color: #9fd3ff; }
 #weather-legend { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; }
@@ -124,7 +129,7 @@ body.replaying #replay-toggle { background: var(--accent); color: #17130a; font-
 .check { display: flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; }
 .check input { accent-color: var(--accent); margin: 0; }
 #count { color: var(--muted); font-weight: 400; }
-#list, #passes { list-style: none; margin: 0 -6px; padding: 0; overflow-y: auto; flex: 1; min-height: 0; }
+#list, #lunar-list, #passes { list-style: none; margin: 0 -6px; padding: 0; overflow-y: auto; flex: 1; min-height: 0; }
 
 .row {
   display: grid;
