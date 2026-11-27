@@ -177,7 +177,75 @@ function starlink(g, m) {
   }
 }
 
-const BUILDERS = { iss, tiangong, hubble, generic, geo, starlink };
+// ---------- 繞月衛星（月球視角，lunar.js）：+Y = 遠離月球、−Y = 朝月面的儀器 ----------
+
+// 拋物面天線：淺碟（朝 +Y 或 −Y）加一根桿子
+function dish(g, m, r, x, y, z, up = 1) {
+  const d = new THREE.Mesh(new THREE.SphereGeometry(r, 20, 8, 0, Math.PI * 2, 0, 0.6), m);
+  d.scale.y = 0.6 * up;
+  d.position.set(x, y, z);
+  g.add(d);
+  return d;
+}
+
+// LRO：直立的長方體本體，側邊一根桿子撐著一大片太陽能板，另一側桿子末端是高增益碟形天線，
+// 底面朝月球的是相機（LROC）和雷射測高儀（LOLA）
+function lro(g, m) {
+  box(g, m.gold, 0.26, 0.38, 0.26);
+  box(g, m.dark, 0.2, 0.012, 0.012, -0.23, 0.08, 0);
+  box(g, m.panel, 0.42, 0.004, 0.34, -0.55, 0.08, 0);
+  box(g, m.dark, 0.22, 0.012, 0.012, 0.24, 0.12, 0);
+  dish(g, m.white, 0.09, 0.36, 0.14, 0);
+  cyl(g, m.silver, 0.05, 0.12, 'y', 0.05, -0.24, 0.05);
+  cyl(g, m.dark, 0.035, 0.08, 'y', -0.07, -0.22, -0.06);
+}
+
+// Danuri（KPLO）：方形本體，左右兩片太陽能板，頂上碟形天線，底面朝月球的 ShadowCam
+function danuri(g, m) {
+  box(g, m.gold, 0.26, 0.24, 0.24);
+  for (const sx of [-1, 1]) {
+    box(g, m.dark, 0.08, 0.01, 0.01, sx * 0.17, 0, 0);
+    box(g, m.panel, 0.34, 0.004, 0.22, sx * 0.38, 0, 0);
+  }
+  box(g, m.dark, 0.012, 0.12, 0.012, 0, 0.18, -0.06);
+  dish(g, m.white, 0.08, 0, 0.24, -0.06);
+  cyl(g, m.silver, 0.06, 0.1, 'y', 0, -0.17, 0.03);
+}
+
+// 月船 2 號軌道器：金箔方塊本體，單側一片大太陽能板，頂上碟形天線，底面相機
+function chandrayaan2(g, m) {
+  box(g, m.gold, 0.32, 0.3, 0.3);
+  box(g, m.dark, 0.1, 0.012, 0.012, -0.21, 0.04, 0);
+  box(g, m.panel, 0.4, 0.004, 0.3, -0.46, 0.04, 0);
+  box(g, m.dark, 0.012, 0.1, 0.012, 0.06, 0.2, 0.06);
+  dish(g, m.white, 0.1, 0.06, 0.25, 0.06);
+  cyl(g, m.silver, 0.045, 0.08, 'y', -0.06, -0.19, -0.06);
+  cyl(g, m.silver, 0.03, 0.06, 'y', 0.08, -0.18, 0.08);
+}
+
+// ARTEMIS（原 THEMIS）：會自旋的八角柱，側面貼太陽能電池；四根細長的電場線狀天線往外伸，
+// 上下各一根軸向天線，兩根磁力計桿
+function artemis(g, m) {
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.11, 8), m.panel);
+  g.add(body);
+  for (const y of [-0.06, 0.06]) {
+    const lid = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.01, 8), m.gold);
+    lid.position.y = y;
+    g.add(lid);
+  }
+  for (let k = 0; k < 4; k++) {
+    const a = (k / 4) * Math.PI * 2 + Math.PI / 8;
+    const wire = box(g, m.white, 0.36, 0.003, 0.003, Math.cos(a) * 0.31, 0, Math.sin(a) * 0.31);
+    wire.rotation.y = -a;
+  }
+  box(g, m.white, 0.004, 0.5, 0.004);
+  for (const a of [Math.PI * 0.5, Math.PI * 1.25]) {
+    const b = box(g, m.dark, 0.2, 0.008, 0.008, Math.cos(a) * 0.22, 0.03, Math.sin(a) * 0.22);
+    b.rotation.y = -a;
+  }
+}
+
+const BUILDERS = { iss, tiangong, hubble, generic, geo, starlink, lro, danuri, chandrayaan2, artemis };
 const KNOWN = { 25544: 'iss', 48274: 'tiangong', 20580: 'hubble' };
 
 // 依 NORAD 編號選模型；不認得的依軌道週期分成同步衛星或一般衛星。

@@ -529,36 +529,65 @@ const lunarBlockStart = (day) => {
 const LUNAR_TTL = 6 * 3600e3;
 const TDB_MINUS_UTC_MS = 69184; // TT − UTC = 32.184 + 37 閏秒；TDB 和 TT 差不到 2 毫秒
 
-async function horizonsVectors(body, day) {
-  const next = new Date(Date.parse(`${day}T00:00:00Z`) + LUNAR_BLOCK_DAYS * 864e5).toISOString().slice(0, 10);
+const MONTHS = { JAN: 1, FEB: 2, MAR: 3, APR: 4, MAY: 5, JUN: 6, JUL: 7, AUG: 8, SEP: 9, OCT: 10, NOV: 11, DEC: 12 };
+// Horizons 的「2026-DEC-20 00:01:09.1836」（TDB）→ UTC 毫秒
+function horizonsTime(str) {
+  const m = str.match(/(\d{4})-([A-Z]{3})-(\d{2}) (\d{2}):(\d{2}):(\d{2})/);
+  if (!m || !MONTHS[m[2]]) return NaN;
+  return Date.UTC(+m[1], MONTHS[m[2]] - 1, +m[3], +m[4], +m[5], +m[6]) - TDB_MINUS_UTC_MS;
+}
+// UTC 毫秒 → Horizons 的 TDB 時間字串（到分鐘）
+const tdbString = (ms) => new Date(ms + TDB_MINUS_UTC_MS).toISOString().slice(0, 16).replace('T', ' ');
+
+async function horizonsQuery(id, startMs, stopMs) {
   const u = new URL(HORIZONS);
   const q = {
-    format: 'json', COMMAND: `'${body.id}'`, EPHEM_TYPE: 'VECTORS', CENTER: "'500@301'",
-    START_TIME: `'${day} 00:00'`, STOP_TIME: `'${next} 00:00'`, STEP_SIZE: `'${LUNAR_STEP_MIN}m'`,
+    format: 'json', COMMAND: `'${id}'`, EPHEM_TYPE: 'VECTORS', CENTER: "'500@301'",
+    START_TIME: `'${tdbString(startMs)}'`, STOP_TIME: `'${tdbString(stopMs)}'`, STEP_SIZE: `'${LUNAR_STEP_MIN}m'`,
     OBJ_DATA: 'NO', REF_PLANE: 'ECLIPTIC', REF_SYSTEM: 'ICRF', VEC_TABLE: '2', VEC_CORR: 'NONE',
     OUT_UNITS: 'KM-S', CSV_FORMAT: 'YES',
   };
   for (const [k, v] of Object.entries(q)) u.searchParams.set(k, v);
-  let json;
-  for (let attempt = 0; !json; attempt++) {
+  for (let attempt = 0; ; attempt++) {
     try {
       const res = await fetch(u, { signal: AbortSignal.timeout(30000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      json = await res.json();
+      const json = await res.json();
+      return String(json.result || json.error || '');
     } catch (err) {
       if (attempt >= 1) throw new Error(`無法連到 JPL Horizons（${err.message}）`);
       await new Promise((r) => setTimeout(r, 1500)); // Horizons 忙碌時（503）稍等再試一次
     }
   }
-  const text = String(json.result || json.error || '');
+}
+
+// 抓一段（day 起 LUNAR_BLOCK_DAYS 天）。星曆在段落中間開始或結束時，Horizons 整段都不給，
+// 所以從錯誤訊息讀出星曆的範圍，縮短時間再抓一次；完全沒有時回傳 error 和 until／from（UTC 毫秒）給前端顯示。
+async function horizonsVectors(body, day) {
+  const base = { id: body.id, name: body.name, kind: body.kind };
+  let startMs = Date.parse(`${day}T00:00:00Z`);
+  let stopMs = startMs + LUNAR_BLOCK_DAYS * 864e5;
+  let limits = {};
+  let text = '';
+  for (let tries = 0; tries < 3; tries++) {
+    text = await horizonsQuery(body.id, startMs, stopMs);
+    if (/\$\$SOE/.test(text)) break;
+    const after = text.match(/No ephemeris for target[^\n]*after A\.D\. ([^\n]*)/);
+    const prior = text.match(/No ephemeris for target[^\n]*prior to A\.D\. ([^\n]*)/);
+    const until = after ? horizonsTime(after[1]) : NaN;
+    const from = prior ? horizonsTime(prior[1]) : NaN;
+    if (Number.isFinite(until)) { limits.until = until; if (until - 60e3 > startMs + 20 * 60e3) { stopMs = Math.min(stopMs, until - 60e3); continue; } }
+    if (Number.isFinite(from)) { limits.from = from; if (from + 60e3 < stopMs - 20 * 60e3) { startMs = Math.max(startMs, from + 60e3); continue; } }
+    return { ...base, ...limits, error: /No ephemeris/i.test(text) ? '這段時間沒有星曆' : '星曆格式不符' };
+  }
   const m = text.match(/\$\$SOE([\s\S]*?)\$\$EOE/);
-  if (!m) return { id: body.id, name: body.name, kind: body.kind, error: /No ephemeris/i.test(text) ? '這段時間沒有星曆' : '星曆格式不符' };
+  if (!m) return { ...base, ...limits, error: '星曆格式不符' };
   const rows = m[1].trim().split('\n').map((l) => l.split(',').map((x) => x.trim()));
   const t0 = (Number(rows[0][0]) - 2440587.5) * 864e5 - TDB_MINUS_UTC_MS;
   const data = [];
   for (const r of rows) for (let k = 2; k < 8; k++) data.push(Math.round(Number(r[k]) * 1e6) / 1e6);
-  if (data.some((v) => !Number.isFinite(v))) return { id: body.id, name: body.name, kind: body.kind, error: '星曆格式不符' };
-  return { id: body.id, name: body.name, kind: body.kind, t0: Math.round(t0), step: LUNAR_STEP_MIN * 60e3, data };
+  if (data.some((v) => !Number.isFinite(v))) return { ...base, error: '星曆格式不符' };
+  return { ...base, ...limits, t0: Math.round(t0), step: LUNAR_STEP_MIN * 60e3, data };
 }
 
 // day 可以是段落裡的任何一天，回傳整段（start = 段落第一天）

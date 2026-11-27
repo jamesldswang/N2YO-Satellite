@@ -8,11 +8,15 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { moonAxes, stateAt, keplerOrbit, MOON_KM } from './lunar-math.js';
+import { makeSatModel, setModelLit } from './models.js';
 
 const DEG = Math.PI / 180;
 const EARTH_R = 6371 / MOON_KM;
 const ORBIT_POINTS = 256;
-const SAT_PX = 9;           // 衛星點的大小（像素）
+const SAT_PX = 9;           // 衛星點的大小（像素）；模型太小（拉遠）時才顯示
+// 3D 模型：固定約 MODEL_PX 像素（真實大小連一個像素都不到），但不超過離月面高度的 1.6 倍，拉遠時才不會插進月球
+const MODEL_PX = 40, MODEL_PX_SELECTED = 60, DOT_BELOW_PX = 12;
+const MODEL_KIND = { '-85': 'lro', '-155': 'danuri', '-152': 'chandrayaan2', '-192': 'artemis', '-193': 'artemis' };
 const EARTH_MIN_PX = 6;     // 地球太小時至少畫幾像素
 const SUN_PX = 90;
 const MAX_DAYS = 4;         // 最多留幾天的星曆
@@ -85,9 +89,16 @@ export class LunarView {
     this.camera = new THREE.PerspectiveCamera(45, 1, 0.001, 600);
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.enableDamping = true;
-    this.controls.minDistance = 1.03;   // 離月面約 50 km
+    this.controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN; // 按住滾輪拖曳 = 平移（和右鍵一樣）
+    // 滾輪往游標指的地方縮放（zoomToCursor），旋轉中心跟著移過去；離月面的下限由 adjustCamera() 擋
+    this.controls.zoomToCursor = true;
+    this.controls.minDistance = 0.005;  // 離旋轉中心約 9 km
     this.controls.maxDistance = 400;    // 地球約在 210–235
     this.controls.enabled = false;
+    this._ray = new THREE.Raycaster();
+    // capture：要比 OrbitControls 自己的 wheel 先執行
+    canvas.addEventListener('wheel', (e) => this.focusUnderCursor(e), { capture: true, passive: true });
+    canvas.addEventListener('dblclick', () => { if (this.on) this.recenter(); });
     this.placed = false;                // 第一次有地球位置時把鏡頭擺好
 
     this.stars = starField();
@@ -100,13 +111,24 @@ export class LunarView {
     this.moonMat = new THREE.MeshLambertMaterial({ color: 0xaaaaaa });
     this.moon = new THREE.Mesh(new THREE.SphereGeometry(1, 128, 64), this.moonMat);
     this.scene.add(this.moon);
-    new THREE.TextureLoader().load(`${texBase}/moon_1024.jpg`, (t) => {
-      t.colorSpace = THREE.SRGBColorSpace;
-      t.anisotropy = 4;
-      this.moonMat.map = t;
-      this.moonMat.color.set(0xffffff);
-      this.moonMat.needsUpdate = true;
-    });
+    // 貼圖由小到大依序換上：先 1024（很快），再 4096、8192（Solar System Scope，NASA LRO 資料，CC BY 4.0，約 1.3 km 一像素）。
+    // 顯示卡不支援 8192 的貼圖就停在 4096
+    const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+    const maxTex = gl ? gl.getParameter(gl.MAX_TEXTURE_SIZE) : 4096;
+    const urls = [`${texBase}/moon_1024.jpg`, 'textures/moon_4096.jpg', ...(maxTex >= 8192 ? ['textures/moon_8192.jpg'] : [])];
+    const loadNext = (i) => {
+      if (i >= urls.length) return;
+      new THREE.TextureLoader().load(urls[i], (t) => {
+        t.colorSpace = THREE.SRGBColorSpace;
+        t.anisotropy = 8;
+        this.moonMat.map?.dispose();
+        this.moonMat.map = t;
+        this.moonMat.color.set(0xffffff);
+        this.moonMat.needsUpdate = true;
+        loadNext(i + 1);
+      }, undefined, () => loadNext(i + 1));
+    };
+    loadNext(0);
 
     this.earth = new THREE.Mesh(new THREE.SphereGeometry(EARTH_R, 64, 32), new THREE.MeshLambertMaterial({ color: 0x6f9fe0 }));
     this.earth.visible = false;
@@ -137,10 +159,14 @@ export class LunarView {
       this.scene.add(point, orbit);
       const label = this.makeLabel('', 'sat');
       label.style.color = `#${color.toString(16).padStart(6, '0')}`;
-      this.sats.set(id, { id, name: '', point, orbit, label, color, pos: new THREE.Vector3(), shown: false, text: '', alt: 0, period: 0, speed: 0, seesEarth: false });
+      const model = makeSatModel(MODEL_KIND[id] || 'generic');
+      model.visible = false;
+      this.scene.add(model);
+      this.sats.set(id, { id, name: '', point, orbit, label, color, model, pos: new THREE.Vector3(), vel: new THREE.Vector3(), px: 0, shown: false, text: '', alt: 0, period: 0, speed: 0, seesEarth: false });
     }
 
     this.selected = null;       // 追蹤清單選取的衛星 id
+    this.hidden = new Set();    // 使用者從追蹤清單移除的衛星 id（app.js 存在 localStorage）
     this.spin = false;          // true = 太空固定（星空不動，看得到月球、地球自轉）；false = 跟著月球轉（月球看起來不動）
     this.qLast = null;          // 上一幀月球的方向（跟著月球轉時用）
     this._q = new THREE.Quaternion();
@@ -199,9 +225,34 @@ export class LunarView {
     return null;
   }
 
+  // 這顆在 ms 為什麼沒有位置：JPL 的預報只到某天（模擬跑太遠）、還沒開始，或下載失敗
   bodyError(id, ms) {
     const b = this.days.get(dayStr(blockOf(ms)))?.bodies?.find((x) => x.id === id);
-    return b?.error ? { name: b.name, error: b.error } : null;
+    if (!b) return null;
+    const date = (t) => new Date(t).toLocaleDateString('zh-TW', { timeZone: 'Asia/Taipei' });
+    if (b.until && ms >= b.until - 10 * 60e3) return { name: b.name, error: `JPL 星曆只到 ${date(b.until)}`, past: true };
+    if (b.from && ms <= b.from + 10 * 60e3) return { name: b.name, error: `JPL 星曆從 ${date(b.from)} 開始` };
+    return b.error ? { name: b.name, error: b.error } : null;
+  }
+
+  // 模擬時間是不是已經超過所有衛星的星曆（給 app.js 提示按「回到即時」）
+  allPast(ms) {
+    const ids = this.visibleIds();
+    return ids.length > 0 && ids.every((id) => this.bodyError(id, ms)?.past);
+  }
+
+  // 追蹤清單上的衛星（沒被移除的）
+  visibleIds() {
+    return [...this.sats.keys()].filter((id) => !this.hidden.has(id));
+  }
+
+  // 從清單移除／加回來：移除的不畫、不列、不提示
+  setHidden(id, hide) {
+    if (!this.sats.has(id)) return;
+    if (hide) this.hidden.add(id); else this.hidden.delete(id);
+    if (hide && this.selected === id) this.select(id); // 取消選取
+    const sat = this.sats.get(id);
+    if (hide) { sat.shown = false; sat.point.visible = sat.orbit.visible = sat.model.visible = false; sat.label.style.display = 'none'; }
   }
 
   // 每幀呼叫（只在月球視角）
@@ -251,12 +302,13 @@ export class LunarView {
 
     // 衛星
     for (const sat of this.sats.values()) {
-      const st = this.state(sat.id, ms);
+      const st = this.hidden.has(sat.id) ? null : this.state(sat.id, ms);
       sat.shown = Boolean(st);
-      sat.point.visible = sat.orbit.visible = sat.shown;
+      sat.point.visible = sat.orbit.visible = sat.model.visible = sat.shown;
       if (!st) continue;
       sat.name = st.name;
       toScene(st.s, sat.pos);
+      toScene(st.s.slice(3), sat.vel);
       sat.point.geometry.attributes.position.setXYZ(0, sat.pos.x, sat.pos.y, sat.pos.z);
       sat.point.geometry.attributes.position.needsUpdate = true;
       const orb = keplerOrbit(st.s, ORBIT_POINTS);
@@ -275,6 +327,7 @@ export class LunarView {
 
     this.controls.update();
     this.adjustCamera();
+    this.placeModels();
     this.placeLabels();
   }
 
@@ -293,12 +346,41 @@ export class LunarView {
     this.placed = true;
   }
 
+  // 滾輪之前：游標指在月面上的話，把旋轉中心沿著視線移到那一點的深度（畫面不會動），
+  // 這樣 zoomToCursor 會剛好往那一點靠近，縮放速度也依離月面的距離
+  focusUnderCursor(e) {
+    if (!this.on) return;
+    const rect = this.canvas.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+    this._ray.setFromCamera(ndc, this.camera);
+    const hit = this._ray.ray.intersectSphere(new THREE.Sphere(new THREE.Vector3(), 1), new THREE.Vector3());
+    // 指在太空（沒碰到月面）時照舊往目前的中心縮放，不然往空處一路放大，月球很快就跑出畫面
+    this.controls.zoomToCursor = Boolean(hit);
+    if (!hit) return;
+    const dir = this.camera.getWorldDirection(new THREE.Vector3());
+    const depth = hit.sub(this.camera.position).dot(dir);
+    if (depth > 1e-4) this.controls.target.copy(this.camera.position).addScaledVector(dir, depth);
+  }
+
+  // 「重置視角」：回到剛進月球視角時的鏡頭（月球在中央、從太陽那側看）；還沒有太陽位置就只把中心移回月球
+  resetView() {
+    if (this.haveSun) this.placeCamera(); else this.recenter();
+  }
+
+  // 雙擊：旋轉中心回到月球中心
+  recenter() {
+    this.controls.target.set(0, 0, 0);
+    this.controls.update();
+  }
+
   adjustCamera() {
+    const MIN_R = 1 + 5 / MOON_KM; // 鏡頭最低離月面 5 km
+    if (this.camera.position.length() < MIN_R) this.camera.position.setLength(MIN_R);
     const dist = this.camera.position.length();
     this.camera.near = Math.max(0.0005, (dist - 1) * 0.25);
     this.camera.far = Math.max(600, dist * 2 + 300);
     this.camera.updateProjectionMatrix();
-    this.controls.zoomSpeed = THREE.MathUtils.clamp((dist - 1) * 2, 0.2, 1);
+    // 縮放速度不用再依高度調：旋轉中心在月面附近時，每格滾輪本來就是依離月面的距離等比例縮放
     this.controls.rotateSpeed = THREE.MathUtils.clamp((dist - 1) * 1.5, 0.15, 1);
     this.stars.position.copy(this.camera.position);
     this.stars.scale.setScalar(this.camera.far * 0.8);
@@ -350,10 +432,37 @@ export class LunarView {
     el.style.display = visible ? '' : 'none';
   }
 
+  // 模型：底面（−Y）朝月球、機頭（+Z）朝前進方向，大小固定幾個像素；在月球影子裡調暗（圓柱形影子）。
+  // 拉遠到模型小於 DOT_BELOW_PX 像素時改顯示彩色圓點
+  placeModels() {
+    const up = this._mu ??= new THREE.Vector3(), fwd = this._mf ??= new THREE.Vector3(), right = this._mr ??= new THREE.Vector3();
+    const basis = this._mb ??= new THREE.Matrix4();
+    const pxScale = (2 * Math.tan((this.camera.fov * DEG) / 2)) / Math.max(1, this.canvas.clientHeight);
+    for (const sat of this.sats.values()) {
+      if (!sat.shown) continue;
+      const m = sat.model;
+      m.position.copy(sat.pos);
+      up.copy(sat.pos).normalize();
+      fwd.copy(sat.vel).addScaledVector(up, -sat.vel.dot(up));
+      if (fwd.lengthSq() < 1e-12) fwd.set(0, 1, 0).cross(up);
+      fwd.normalize();
+      right.crossVectors(up, fwd);
+      m.quaternion.setFromRotationMatrix(basis.makeBasis(right, up, fwd));
+      const worldPerPx = this.camera.position.distanceTo(sat.pos) * pxScale;
+      const px = this.selected === sat.id ? MODEL_PX_SELECTED : MODEL_PX;
+      const scale = Math.min(worldPerPx * px, Math.max((sat.pos.length() - 1) * 1.6, 1e-4));
+      m.scale.setScalar(scale);
+      sat.px = scale / worldPerPx;
+      sat.point.visible = sat.px < DOT_BELOW_PX;
+      const d = sat.pos.dot(this.sunDir);
+      setModelLit(m, d > 0 || up.copy(sat.pos).addScaledVector(this.sunDir, -d).lengthSq() > 1);
+    }
+  }
+
   placeLabels() {
     for (const sat of this.sats.values()) {
       if (sat.label.textContent !== sat.text) sat.label.textContent = sat.text;
-      this.place(sat.label, sat.pos, 7, sat.shown && !this.hiddenByMoon(sat.pos));
+      this.place(sat.label, sat.pos, Math.max(7, sat.px * 0.55), sat.shown && !this.hiddenByMoon(sat.pos));
     }
     const pxScale = (2 * Math.tan((this.camera.fov * DEG) / 2)) / Math.max(1, this.canvas.clientHeight);
     const eDist = this.camera.position.distanceTo(this.earthPos);
@@ -379,6 +488,7 @@ export class LunarView {
       if (v.z >= 1 || Math.abs(v.x) > 0.85 || Math.abs(v.y) > 0.85 || this.hiddenByMoon(sat.pos)) {
         const r = sat.pos.length();
         this.camera.position.copy(sat.pos).setLength(Math.min(Math.max(r * 2.2, 3), this.controls.maxDistance));
+        this.controls.target.set(0, 0, 0);
         this.controls.update();
       }
     }
@@ -386,7 +496,7 @@ export class LunarView {
 
   // 追蹤清單用：每顆衛星的狀態（依高度排序）
   listInfo(ms) {
-    return [...this.sats.values()].map((sat) => ({
+    return [...this.sats.values()].filter((sat) => !this.hidden.has(sat.id)).map((sat) => ({
       id: sat.id, name: sat.name || LUNAR_INFO[sat.id].title, color: `#${sat.color.toString(16).padStart(6, '0')}`,
       shown: sat.shown, alt: sat.alt, period: sat.period, speed: sat.speed, seesEarth: sat.seesEarth,
       error: sat.shown ? '' : (this.bodyError(sat.id, ms)?.error || '載入中…'),
@@ -396,7 +506,7 @@ export class LunarView {
   // 沒有星曆的衛星（給 app.js 的提示列）
   missing(ms) {
     const out = [];
-    for (const id of this.sats.keys()) {
+    for (const id of this.visibleIds()) {
       const e = this.bodyError(id, ms);
       if (e) out.push(`${e.name}：${e.error}`);
     }

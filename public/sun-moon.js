@@ -120,11 +120,15 @@ export class SunMoon {
       }),
     );
     this.moon.visible = false;
-    new THREE.TextureLoader().load(`${texBase}/moon_1024.jpg`, (t) => {
+    // 先用 1024 的貼圖，再換成 4096（Solar System Scope，NASA LRO 資料，CC BY 4.0）；拉近月球時才看得到差別
+    const load = (url, next) => new THREE.TextureLoader().load(url, (t) => {
       t.colorSpace = THREE.SRGBColorSpace;
+      this.moonUniforms.map.value?.dispose();
       this.moonUniforms.map.value = t;
       this.moonUniforms.ready.value = 1;
-    });
+      next?.();
+    }, undefined, () => next?.());
+    load(`${texBase}/moon_1024.jpg`, () => load('textures/moon_4096.jpg'));
 
     // 月球軌道線：一個恆星月（27.3 天）的位置，用同一個地球角度換算，畫出來是太空中閉合的軌道；
     // 之後每幀依地球多轉的角度旋轉（地球固定座標裡，軌道面一天繞地球轉一圈）

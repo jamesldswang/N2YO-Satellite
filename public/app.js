@@ -65,8 +65,8 @@ scene.background = new THREE.Color(0x03050b);
 const camera = new THREE.PerspectiveCamera(45, 1, 0.05, 400);
 const controls = new OrbitControls(camera, canvas);
 controls.enablePan = false;
-// 按住滾輪拖曳也是移動地圖（和左鍵一樣），滾動滾輪仍然是縮放
-controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
+// 按住滾輪拖曳 = 整個畫面平移（見下面的 panView），OrbitControls 不處理中鍵；滾動滾輪仍然是縮放
+controls.mouseButtons.MIDDLE = null;
 controls.enableDamping = true;
 controls.minDistance = 1.2;
 controls.maxDistance = 170; // 約 108 萬公里：看得到整個月球軌道（約 60 個地球半徑）
@@ -244,6 +244,7 @@ let view = 'space';
 let spin = false; // 地球自轉模式（見 setSpin）
 let solar = null;  // 太陽系示意模式（SolarSystem，見 setSolar）
 const solarOn = () => Boolean(solar?.on);
+let panX = 0, panY = 0, panDrag = null; // 太空俯瞰按住滾輪拖曳的畫面平移（像素，見 applyPan）
 let lunar = null;  // 月球視角（LunarView，見 setLunar）
 const lunarOn = () => Boolean(lunar?.on);
 const otherView = () => solarOn() || lunarOn(); // 地球畫面整個被換掉（太陽系或月球視角）
@@ -693,6 +694,16 @@ const addMenu = $('add-menu');
 let menuItems = [], menuIndex = -1;
 
 function addSat(id) {
+  if (lunarOn()) {
+    if (typeof id !== 'string' || !lunar.hidden.has(id)) {
+      addInput.setCustomValidity(lunar.hidden.size ? '請從清單選一顆繞月衛星' : '五顆繞月衛星都已在清單上');
+      addInput.reportValidity();
+      return false;
+    }
+    addInput.value = '';
+    setLunarHidden(id, false);
+    return true;
+  }
   if (!Number.isInteger(id) || id <= 0 || sats.has(id) || sats.size >= MAX_SATS) {
     addInput.setCustomValidity(sats.has(id) ? '已在清單中' : sats.size >= MAX_SATS ? `最多 ${MAX_SATS} 顆` : '請輸入 NORAD 編號，或從清單選一顆');
     addInput.reportValidity();
@@ -708,7 +719,7 @@ function addSat(id) {
 
 function renderAddMenu() {
   const q = addInput.value.trim().toLowerCase();
-  menuItems = CATALOG.filter((c) => !sats.has(c.id)
+  menuItems = lunarOn() ? lunarMenuItems(q) : CATALOG.filter((c) => !sats.has(c.id)
     && (!q || String(c.id).startsWith(q) || c.en.toLowerCase().includes(q)
       || c.name.toLowerCase().includes(q) || c.kind.includes(q)));
   menuIndex = -1;
@@ -732,7 +743,8 @@ function renderAddMenu() {
   if (!rows.length) {
     const li = document.createElement('li');
     li.className = 'menu-empty';
-    li.textContent = /^\d+$/.test(q) ? `清單裡沒有，按「加入」直接追蹤 ${q}` : '沒有符合的衛星';
+    li.textContent = lunarOn() ? (lunar.hidden.size ? '沒有符合的繞月衛星' : '五顆繞月衛星都已在清單上')
+      : /^\d+$/.test(q) ? `清單裡沒有，按「加入」直接追蹤 ${q}` : '沒有符合的衛星';
     rows.push(li);
   }
   addMenu.replaceChildren(...rows);
@@ -749,7 +761,7 @@ function setMenuIndex(i, scroll = true) {
   li.classList.add('active');
   addInput.setAttribute('aria-activedescendant', li.id);
   if (scroll) li.scrollIntoView({ block: 'nearest' });
-  showSatTip({ id: menuItems[i].id }, li);
+  if (lunarOn()) lunarTip(menuItems[i].id, li); else showSatTip({ id: menuItems[i].id }, li);
 }
 
 function closeAddMenu() {
@@ -781,7 +793,7 @@ $('add').addEventListener('submit', (e) => {
   e.preventDefault();
   const text = addInput.value.trim();
   // 打的是名稱：用選單裡第一個符合的
-  const id = /^\d+$/.test(text) ? Number(text) : menuItems[0]?.id;
+  const id = /^\d+$/.test(text) && !lunarOn() ? Number(text) : menuItems[0]?.id;
   if (addSat(id)) renderAddMenu();
 });
 
@@ -829,6 +841,8 @@ canvas.addEventListener('wheel', endFly, { passive: true });
 function homeSpace() {
   endFly();
   tilt = heading = 0;
+  panX = panY = 0;
+  applyPan();
   camera.position.copy(up).multiplyScalar(3.4);
   controls.target.set(0, 0, 0);
   controls.update();
@@ -837,6 +851,7 @@ function homeSpace() {
 function setView(next) {
   if (view === 'space' && next === 'sky') savedSpacePos = camera.position.clone();
   view = next;
+  if (view === 'sky') { panX = panY = 0; applyPan(); }
   const space = view === 'space';
   controls.enabled = space;
   atmosphere.visible = stars.visible = taiwanGroup.visible = space;
@@ -858,13 +873,16 @@ function setView(next) {
 }
 
 function updateHint() {
-  let text = '拖曳移動・右鍵（或 Shift＋左鍵）拖曳斜看・滾輪縮放・彩色直線連接台灣與地平線上的衛星・點選清單可標示軌道';
+  let text = '拖曳移動・右鍵（或 Shift＋左鍵）拖曳斜看・按住滾輪拖曳平移畫面・滾輪縮放・彩色直線連接台灣與地平線上的衛星・點選清單可標示軌道';
   if (lunarOn()) {
-    text = `月球視角：拖曳旋轉・右鍵拖曳平移・滾輪縮放・月球、衛星、地球都是真實位置和大小（NASA JPL Horizons 星曆）・${spin ? '自轉：星空固定，看得到月球和地球自轉' : '鏡頭跟著月球轉（按「自轉」看月球和地球自轉）'}`;
-    const extra = [lunar.status, ...lunar.missing(clockMs())].filter(Boolean);
+    text = `月球視角：拖曳旋轉・右鍵或按住滾輪拖曳平移・滾輪往游標處縮放（旋轉中心跟著移過去，雙擊回到月球中心）・月球、衛星、地球都是真實位置和大小（NASA JPL Horizons 星曆；月球貼圖 Solar System Scope／NASA LRO，CC BY 4.0）・${spin ? '自轉：星空固定，看得到月球和地球自轉' : '鏡頭跟著月球轉（按「自轉」看月球和地球自轉）'}`;
+    const ms = clockMs();
+    const extra = lunar.allPast(ms)
+      ? [lunar.status, '模擬時間已超過所有繞月衛星的 JPL 星曆預報，按「回到即時」回到現在'].filter(Boolean)
+      : [lunar.status, ...lunar.missing(ms)].filter(Boolean);
     if (extra.length) text += `・${extra.join('・')}`;
   } else if (solarOn()) {
-    text = '太陽系示意：拖曳旋轉・右鍵拖曳平移・滾輪縮放・方向是真的；距離開根號縮放、大小放大（不是真實比例）';
+    text = '太陽系示意：拖曳旋轉・右鍵或按住滾輪拖曳平移・滾輪縮放・方向是真的；距離開根號縮放、大小放大（不是真實比例）';
   } else if (view === 'sky') {
     const known = [...sats.values()].filter((s) => s.state);
     text = known.length && !known.some((s) => s.state.el > 0)
@@ -878,7 +896,8 @@ document.querySelectorAll('[data-view]').forEach((b) => b.addEventListener('clic
   if (b.dataset.view !== view) setView(b.dataset.view);
 }));
 $('reset').addEventListener('click', () => {
-  if (view === 'space') homeSpace();
+  if (lunarOn()) lunar.resetView(); // 月球視角：回到以月球中心、從太陽那側看的起始鏡頭
+  else if (view === 'space') homeSpace();
   else { lookAz = 180; lookEl = HOME_LOOK_EL; camera.fov = 70; camera.updateProjectionMatrix(); }
 });
 
@@ -962,7 +981,7 @@ function resize() {
   coastMaterial.resolution.set(w, h);
   renderer.getDrawingBufferSize(tailResolution.value);
   camera.aspect = w / h;
-  camera.updateProjectionMatrix();
+  applyPan();
   solar?.resize(w, h);
   lunar?.resize(w, h);
 }
@@ -1703,17 +1722,19 @@ function lunarRow(id, color) {
   name.className = 'name';
   const elev = document.createElement('span');
   elev.className = 'elev';
-  const pad = document.createElement('span'); // 地球清單的「×」那一欄
+  const remove = document.createElement('button');
+  remove.className = 'remove';
+  remove.type = 'button';
+  remove.textContent = '×';
+  remove.setAttribute('aria-label', '移除');
+  remove.addEventListener('click', (e) => { e.stopPropagation(); setLunarHidden(id, true); });
   const sub = document.createElement('span');
   sub.className = 'sub';
-  el.append(dot, name, elev, pad, sub);
+  el.append(dot, name, elev, remove, sub);
   const pick = () => { lunar.select(id); renderLunarList(); };
   el.addEventListener('click', pick);
   el.addEventListener('keydown', (e) => { if (e.key === 'Enter') pick(); });
-  const tip = () => {
-    const i = LUNAR_INFO[id];
-    showInfoTip({ ...i, facts: [`NORAD ${i.norad}`, ...i.facts, '位置：NASA JPL Horizons'] }, el);
-  };
+  const tip = () => lunarTip(id, el);
   el.addEventListener('mouseenter', tip);
   el.addEventListener('focus', tip);
   el.addEventListener('mouseleave', hideSatTip);
@@ -1722,6 +1743,32 @@ function lunarRow(id, color) {
   lunarRows.set(id, row);
   return row;
 }
+// 移除／加回繞月衛星（記在 localStorage lunar-hidden；伺服器還是五顆都抓，只是不畫）
+function loadLunarHidden() {
+  try {
+    const ids = JSON.parse(localStorage.getItem('lunar-hidden') || '[]');
+    for (const id of ids) lunar.setHidden(String(id), true);
+  } catch { /* 沒有就全部顯示 */ }
+}
+function setLunarHidden(id, hide) {
+  lunar.setHidden(id, hide);
+  try { localStorage.setItem('lunar-hidden', JSON.stringify([...lunar.hidden])); } catch { /* 不記也沒關係 */ }
+  if (hide) { lunarRows.get(id)?.el.remove(); lunarRows.delete(id); hideSatTip(); }
+  renderLunarList();
+  updateHint();
+}
+function lunarTip(id, el) {
+  const i = LUNAR_INFO[id];
+  showInfoTip({ ...i, facts: [`NORAD ${i.norad}`, ...i.facts, '位置：NASA JPL Horizons'] }, el);
+}
+// 「加入」選單在月球視角列出被移除的繞月衛星
+function lunarMenuItems(q) {
+  return Object.entries(LUNAR_INFO)
+    .filter(([id, i]) => lunar.hidden.has(id)
+      && (!q || String(i.norad).startsWith(q) || i.title.toLowerCase().includes(q) || i.kind.toLowerCase().includes(q)))
+    .map(([id, i]) => ({ id, en: i.title, kind: i.kind }));
+}
+
 // tickSlow 每 250 毫秒呼叫（只在月球視角）
 function renderLunarList() {
   const list = lunar.listInfo(clockMs());
@@ -1743,7 +1790,9 @@ function renderLunarList() {
     row.sub.classList.toggle('err', !x.shown && x.error !== '載入中…');
   });
   const n = list.filter((x) => x.shown).length;
-  $('count').textContent = `繞月衛星 ${n} 顆，依高度排序（綠色 = 看得到地球）`;
+  $('count').textContent = list.length
+    ? `繞月衛星 ${n} 顆，依高度排序（綠色 = 看得到地球）`
+    : '清單是空的，從下面「加入」選回繞月衛星';
 }
 
 // 上方的「地球｜月球｜太陽系」切換：目前的畫面亮起來
@@ -1769,15 +1818,26 @@ let lunarStartedSim = false, lunarPrevSlider = null;
 function setLunar(on) {
   if (on === lunarOn()) return;
   if (on && solarOn()) setSolar(false);
-  lunar ??= new LunarView(canvas, earthUniforms.dayMap, TEX);
+  if (!lunar) {
+    lunar = new LunarView(canvas, earthUniforms.dayMap, TEX);
+    // 衛星模型是金屬材質，要有環境反射才不會是黑的（和地球畫面共用同一張）
+    lunar.scene.environment = scene.environment;
+    lunar.scene.environmentIntensity = scene.environmentIntensity;
+  }
   lunar.spin = spin;
   lunar.setOn(on);
   resize();
   controls.enabled = !on && view === 'space';
   document.body.classList.toggle('lunar', on);
   updateSceneButtons();
-  // 追蹤清單換成繞月衛星；過境預報、加入衛星是地球的功能，先藏起來
-  $('list').hidden = $('add').hidden = $('quota').hidden = on;
+  // 追蹤清單換成繞月衛星；過境預報是地球的功能，先藏起來；「加入」改成加回被移除的繞月衛星
+  $('list').hidden = $('quota').hidden = on;
+  if (on && !lunar.loadedHidden) { loadLunarHidden(); lunar.loadedHidden = true; }
+  addInput.value = '';
+  addInput.setCustomValidity('');
+  addInput.placeholder = on ? '加入繞月衛星（名稱）' : 'NORAD 編號或名稱';
+  addInput.setAttribute('aria-label', addInput.placeholder);
+  closeAddMenu();
   $('lunar-list').hidden = !on;
   document.querySelector('[data-tab="passes"]').hidden = on;
   if (on && passTab) setTab('list');
@@ -1968,6 +2028,30 @@ window.addEventListener('pointerup', () => {
   controls.enabled = view === 'space' && !otherView();
 });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// 按住滾輪（中鍵）拖曳：整個畫面跟著滑鼠平移（太空俯瞰）。用 camera.setViewOffset 把投影往旁邊移，
+// 鏡頭仍然對著地心，所以縮放、旋轉、斜看、標籤都不受影響；重置視角歸零。
+function applyPan() {
+  const w = canvas.clientWidth || window.innerWidth, h = canvas.clientHeight || window.innerHeight;
+  if (panX || panY) camera.setViewOffset(w, h, panX, panY, w, h);
+  else camera.clearViewOffset();
+  camera.updateProjectionMatrix();
+}
+canvas.addEventListener('pointerdown', (e) => {
+  if (e.button !== 1 || view !== 'space' || otherView()) return;
+  e.preventDefault(); // 不要出現瀏覽器的自動捲動
+  endFly();
+  panDrag = { x: e.clientX, y: e.clientY, panX, panY };
+});
+canvas.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
+window.addEventListener('pointermove', (e) => {
+  if (!panDrag) return;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  panX = THREE.MathUtils.clamp(panDrag.panX - (e.clientX - panDrag.x), -w * 0.45, w * 0.45);
+  panY = THREE.MathUtils.clamp(panDrag.panY - (e.clientY - panDrag.y), -h * 0.45, h * 0.45);
+  applyPan();
+});
+window.addEventListener('pointerup', () => { panDrag = null; });
 
 function applyTilt() {
   const altKm = (camera.position.length() - 1) * EARTH_KM;

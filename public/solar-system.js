@@ -77,6 +77,7 @@ export class SolarSystem {
     this.camera.position.set(0, 48, 70);
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.enableDamping = true;
+    this.controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN; // 按住滾輪拖曳 = 平移（和右鍵一樣）
     this.controls.minDistance = 2;
     this.controls.maxDistance = 260;
     this.controls.enabled = false;
