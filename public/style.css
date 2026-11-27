@@ -56,6 +56,11 @@ body.solar #labels, body.solar #altitude, body.lunar #labels, body.lunar #altitu
 .label.compass { background: none; color: var(--accent); font-size: 17px; font-weight: 600; margin: -13px 0 0 -8px; pointer-events: none; }
 .label.grid { background: rgba(10, 14, 24, 0.85); color: #f5c451; border: 1px solid #f5c451; font-weight: 600; pointer-events: none; }
 .label.place { background: none; color: var(--accent); font-weight: 600; pointer-events: none; }
+/* 我家：水滴圖標，尖端對準座標（padding 5 + 圖標半寬 9 = 14；高 24） */
+.label.home { pointer-events: auto; cursor: pointer; margin: -24px 0 0 -14px; height: 24px; line-height: 24px; color: #ff8fab; text-shadow: 0 0 3px #000, 0 0 6px #000; }
+.label.home::before { content: ''; display: inline-block; width: 18px; height: 24px; margin-right: 3px; vertical-align: top;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 32'%3E%3Cpath d='M12 1C6 1 1 5.9 1 12c0 8.2 11 19 11 19s11-10.8 11-19C23 5.9 18 1 12 1z' fill='%23ff4d6d' stroke='%23fff' stroke-width='1.5'/%3E%3Ccircle cx='12' cy='12' r='4.2' fill='%23fff'/%3E%3C/svg%3E") center / contain no-repeat;
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,.7)); }
 
 .bar {
   position: fixed; top: 12px; left: 12px;

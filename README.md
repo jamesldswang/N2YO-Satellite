@@ -1,6 +1,6 @@
 # 🛰️ 台灣上空衛星
 
-**版本：1.16.1**
+**版本：1.17.0**
 
 用 Three.js 顯示地球和衛星的即時位置。預設地球固定不轉（可以切換成看地球自轉），視角以台灣為中心，可以看出哪些衛星現在在台灣的地平線上、仰角和方位多少。資料來自 [N2YO REST API](https://www.n2yo.com/api/)。
 
@@ -52,6 +52,7 @@
 - Black Marble 還沒載入前，範圍內暫時用原本的低解析燈光圖（約 20 km／像素），拉得越近越淡，避免變成一大團光暈。
 - 台灣的海岸線（青色 #00FFFF，2 像素粗，含澎湖、金門、綠島、蘭嶼）來自 Natural Earth 1:10m（公有領域），由 `tools/make-coastline.py` 產生 `public/taiwan-coast.json`；精度約 1 km，所以拉到離地 400 km 以內時會隱藏（影像本身就看得到海岸線）。
 - 有顯示高解析影像時，右下角會標示影像出處。
+- **航照（看得到房子）**：拉近到每像素小於約 20 m 時，台灣陸地改疊內政部國土測繪中心（NLSC）的正射影像（WMTS `PHOTO2`），最細第 19 層約 0.3 m／像素；台灣附近最低可以拉到離地 0.3 km。瀏覽器直接向 NLSC 抓圖塊（有 CORS，不經過伺服器、不存資料資料夾），外海用同一張外海遮罩擋掉。圖上有淡淡的 NLSC 浮水印。晚上也維持至少原本亮度的 85%（`photo-tiles.js` 的 `PHOTO_MIN_LIGHT`），不像其他影像跟著變暗。
 
 ### 加速模擬
 
@@ -254,6 +255,7 @@ NORAD 編號可以在 [n2yo.com](https://www.n2yo.com/) 或 [CelesTrak](https://
 | 月球視角（NASA JPL Horizons，不是 N2YO） | `ssd.jpl.nasa.gov/api/horizons.api` 向量表（月心、J2000 黃道，公開，不用金鑰） | 開月球視角時一次抓 4 天（7 個天體各一個請求），伺服器快取 6 小時 | 無 |
 | 溫度／風圖層（中央氣象署，不是 N2YO） | `O-A0003-001`（公開，不用授權碼） | 開啟時每 5 分鐘，伺服器快取 3 分鐘 | 無 |
 | 氣象測站、東亞雲圖（中央氣象署，長期收集） | `O-A0003-001`、`O-B0032-003`（公開，不用授權碼） | 每 5 分鐘檢查，伺服器開著就收集 | 無 |
+| 台灣航照（內政部國土測繪中心） | WMTS `PHOTO2`（GoogleMapsCompatible，256 px JPEG），公開，不用金鑰，政府資料開放授權條款第 1 版 | 拉近到每像素 < 約 20 m 才抓，瀏覽器快取 | 同時最多 6 塊 |
 | 台灣高解析影像（EOX，不是 N2YO） | WMS `s2cloudless-2025`（白天）、`blackmarble`（夜晚），公開，不用金鑰 | 第一次看到某一塊時下載，之後讀資料資料夾的 `tw-tiles/` | 伺服器同時最多下載 4 塊 |
 | 台灣海岸線（Natural Earth，不是 N2YO） | 1:10m Admin 0 Countries（公有領域） | 已存在 `public/taiwan-coast.json`，執行時不連網 | 無 |
 | 星鏈（CelesTrak，不是 N2YO） | `gp.php?GROUP=starlink` | 每 2.5 小時，存在資料資料夾，另存歷史備份 | CelesTrak 2 小時內不能重複下載 |
@@ -268,6 +270,7 @@ NORAD 編號可以在 [n2yo.com](https://www.n2yo.com/) 或 [CelesTrak](https://
 | 想改的東西 | 檔案 | 位置 |
 |-----------|------|------|
 | 觀測點（預設台灣地理中心） | `server.js` | `OBSERVER`，改完方位角與仰角就以該點計算 |
+| 我家標記 | `server.js` | `HOME`（名稱、緯度、經度，WGS84），太空俯瞰時在地球上顯示水滴圖標和名稱（拉遠到看月球軌道時隱藏），點它慢慢（6 秒，`app.js` 的 `HOME_FLY_MS`）拉近到家上空 0.3 km；不影響方位角、仰角 |
 | 預設衛星 | `public/app.js` | `DEFAULT_IDS` |
 | 清單上限 | `public/app.js` | `MAX_SATS`（注意每小時額度） |
 | 衛星模型在畫面上的大小 | `public/app.js` | `MODEL_PX`、`MODEL_PX_SELECTED` |
@@ -319,6 +322,7 @@ satellite-tracker/
 │   ├── starlink.js    # 星鏈圖層（光點、每幀外插、台灣上空計數）
 │   ├── starlink-worker.js  # 在背景執行緒計算上萬顆星鏈的位置和速度
 │   ├── taiwan-tiles.js  # 台灣高解析影像的分層載入（四分樹圖塊、和底圖混合）
+│   ├── photo-tiles.js   # 台灣航照（國土測繪中心 WMTS，麥卡托圖塊，拉很近才出現）
 │   ├── taiwan-coast.json  # 台灣海岸線（Natural Earth 1:10m）
 │   ├── sun-moon.js    # 太陽、月亮（月亮星曆、月相）
 │   ├── planets.js     # 行星日心位置（JPL 近似軌道根數，純計算）
@@ -358,7 +362,7 @@ satellite-tracker/
 
 ## 已知限制
 
-- **需要網路**：Three.js、satellite.js、夜晚燈光貼圖和月球貼圖從 CDN 載入，衛星資料也要連 N2YO（日間地球貼圖在本機）。台灣高解析影像第一次看到某個地方時也要連 EOX。
+- **需要網路**：Three.js、satellite.js、夜晚燈光貼圖和月球貼圖從 CDN 載入，衛星資料也要連 N2YO（日間地球貼圖在本機）。台灣高解析影像第一次看到某個地方時也要連 EOX；航照每次都向國土測繪中心抓（只靠瀏覽器快取）。
 - **高解析影像只有台灣附近**：其他地方最多拉近到離地約 1274 km，用的是 Blue Marble（約 7 km／像素）。範圍邊緣約 0.3° 和 Blue Marble 混合，福建內陸看得到兩種影像顏色不同。
 - **月球貼圖**（`public/textures/moon_4096.jpg`、`moon_8192.jpg`）來自 Solar System Scope（以 NASA LRO 資料製作），CC BY 4.0，月球畫面下方已標示出處。
 - **高解析影像不能商用**：EOxCloudless 2025 是 CC BY-NC-SA 4.0，畫面上要標示出處（已自動顯示）。要商用得向 EOX 購買授權。夜晚燈光 Black Marble 是 NASA 的資料，只要標示出處。
@@ -384,6 +388,11 @@ satellite-tracker/
 ---
 
 ## 版本紀錄
+
+### 1.17.0（2026-11-27）
+
+- 地球上加「My Home」水滴圖標（三峽），太空俯瞰時顯示；點它就慢慢（6 秒）拉近到家上空 0.3 km
+- 台灣航照：拉近時改疊內政部國土測繪中心正射影像（最細約 0.3 m／像素，看得到房子），台灣附近最低可拉到離地 0.3 km（原本 15 km）
 
 ### 1.16.1（2026-11-27）
 

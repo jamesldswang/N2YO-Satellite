@@ -12,6 +12,7 @@ import { satInfo, CATALOG, initialName } from './sat-info.js';
 import { makeTail, setTailPoints, disposeTail, tailResolution, TAIL_POINTS } from './tail.js';
 import { SunMoon, phaseName } from './sun-moon.js';
 import { TaiwanTiles } from './taiwan-tiles.js';
+import { PhotoTiles, PHOTO_CREDIT, PHOTO_CREDIT_URL } from './photo-tiles.js';
 import { SolarSystem } from './solar-system.js';
 import { LunarView, LUNAR_INFO } from './lunar.js';
 
@@ -72,7 +73,7 @@ controls.minDistance = 1.2;
 controls.maxDistance = 170; // 約 108 萬公里：看得到整個月球軌道（約 60 個地球半徑）
 // 台灣附近可以拉近到離地 CLOSE_MIN_KM（有高解析圖塊），其他地方維持 FAR_MIN_KM；
 // 中間依相機離台灣多遠（度）漸變，所以轉離台灣時相機會慢慢升高
-const CLOSE_MIN_KM = 15, FAR_MIN_KM = 1274;
+const CLOSE_MIN_KM = 0.3, FAR_MIN_KM = 1274; // 0.3 km：國土測繪中心航照看得到房子
 const CLOSE_ZONE_DEG = 4, FAR_ZONE_DEG = 12;
 
 function placeholder(r, g, b) {
@@ -803,10 +804,12 @@ let lookAz = 180, lookEl = HOME_LOOK_EL;
 let savedSpacePos = null;
 const compassLabels = [];
 let taiwanLabel;
+let homeLabel, homePos; // 使用者的家（/api/config 的 home）
+const HOME_FLY_MS = 6000; // 點水滴圖標時慢慢拉近到家（一般 flyTo 是 1.2 秒）
 
 // 鏡頭飛到 dir 方向（地心往外）正上方 altKm，朝正下方看；約 1.2 秒。拖曳或滾輪會中斷。
 let camFly = null;
-function flyTo(dir, altKm) {
+function flyTo(dir, altKm, dur = 1200) {
   if (solarOn()) setSolar(false);
   if (lunarOn()) setLunar(false);
   if (view !== 'space') setView('space');
@@ -814,7 +817,7 @@ function flyTo(dir, altKm) {
   camFly = {
     from: from.clone().normalize(), to: dir.clone().normalize(),
     fromAlt: Math.max(from.length() - 1, 1e-6), toAlt: altKm / EARTH_KM,
-    t0: performance.now(), dur: 1200,
+    t0: performance.now(), dur,
   };
   tilt = heading = 0;
   controls.enableDamping = false; // 清掉拖曳的慣性，不然到了之後還會滑一下
@@ -855,7 +858,7 @@ function setView(next) {
   const space = view === 'space';
   controls.enabled = space;
   atmosphere.visible = stars.visible = taiwanGroup.visible = space;
-  if (!space) taiwanTiles?.hideAll();
+  if (!space) { taiwanTiles?.hideAll(); photoTiles?.hideAll(); }
   skyGrid.visible = !space;
   camera.near = space ? 0.05 : 0.0005;
   camera.fov = space ? 45 : 70;
@@ -971,6 +974,9 @@ function updateLabels() {
   }
   for (const { el, world } of compassLabels) placeLabel(el, world, view === 'sky');
   placeLabel(taiwanLabel, up, view === 'space' && !hiddenByEarth(up.clone().multiplyScalar(1.001)));
+  if (homeLabel) {
+    placeLabel(homeLabel, homePos, view === 'space' && !farView() && !hiddenByEarth(homePos.clone().multiplyScalar(1.001)));
+  }
   placeGridLabel();
   placeSunMoonLabels();
 }
@@ -2076,7 +2082,7 @@ function renderAltitude() {
   if (el.textContent !== text) el.textContent = text;
 }
 
-let taiwanTiles = null;
+let taiwanTiles = null, photoTiles = null;
 const tilesCenter = new THREE.Vector3();
 // 太空俯瞰：依高度調整拉近範圍、縮放和旋轉速度、近裁切面
 function adjustSpaceCamera() {
@@ -2090,7 +2096,7 @@ function adjustSpaceCamera() {
   // 畫面高度看到的地面約 2 × alt × tan(22.5°) = 0.83 × alt（弧度），所以 rotateSpeed ≈ 0.13 × alt。
   // 拉遠時（alt > 約 1.4）回到 1
   controls.rotateSpeed = Math.min(1, 0.132 * alt * (1 + 3 * alt));
-  const near = THREE.MathUtils.clamp(alt * 0.3, 2e-5, 0.05);
+  const near = THREE.MathUtils.clamp(alt * 0.3, 5e-6, 0.05);
   // 遠裁切面：平常 400；拉遠看月球軌道時跟著放大，月亮、太陽、星空才不會被切掉
   const far = Math.max(400, dist * 2.5 + 100);
   if (Math.abs(near - camera.near) > near * 0.2 || Math.abs(far - camera.far) > far * 0.05) {
@@ -2133,6 +2139,7 @@ function frame() {
     controls.update();
     applyTilt();
     taiwanTiles?.update();
+    photoTiles?.update();
   } else aimSky();
   weather.update(view === 'space' && !hiddenByEarth(up.clone().multiplyScalar(1.001)));
   clouds.setForecast(ms, Boolean(sim)); // 每幀更新外推時間，高倍速時雲才會連續移動
@@ -2182,12 +2189,33 @@ async function start() {
     const link = credit.querySelector('a');
     link.textContent = `台灣影像：${tw.credit}`;
     link.href = tw.creditUrl;
+    // 航照出處另外一行，只在航照圖塊顯示時出現
+    const photoLink = document.createElement('a');
+    photoLink.target = '_blank'; photoLink.rel = 'noopener';
+    photoLink.textContent = PHOTO_CREDIT; photoLink.href = PHOTO_CREDIT_URL;
+    photoLink.hidden = true;
+    photoLink.style.display = 'block';
+    credit.append(photoLink);
+    let twOn = false, photoOn = false;
+    const showCredit = () => { credit.hidden = !(twOn || photoOn); photoLink.hidden = !photoOn; };
     taiwanTiles = new TaiwanTiles({
       scene, camera, renderer, geoToVec, earthUniforms, shadeGlsl: EARTH_SHADE, config: tw,
-      onCredit: (on) => { credit.hidden = !on; },
+      onCredit: (on) => { twOn = on; showCredit(); },
+    });
+    photoTiles = new PhotoTiles({
+      scene, camera, renderer, geoToVec, earthUniforms, shadeGlsl: EARTH_SHADE,
+      bounds: tw, seaMask: taiwanTiles.material.uniforms.seaMask,
+      onCredit: (on) => { photoOn = on; showCredit(); },
     });
   }
   taiwanLabel = makeLabel('place', observer.name);
+  if (config.home) {
+    homeLabel = makeLabel('place home', config.home.name);
+    homePos = geoToVec(config.home.lat, config.home.lng, 0);
+    // 點水滴圖標：飛到家上空最低高度（看得到房子的航照）
+    homeLabel.title = '飛到家上空';
+    homeLabel.addEventListener('click', () => flyTo(homePos, CLOSE_MIN_KM, HOME_FLY_MS));
+  }
   for (const [text, az] of [['北', 0], ['東', 90], ['南', 180], ['西', 270]]) {
     compassLabels.push({
       el: makeLabel('compass', text),

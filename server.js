@@ -33,6 +33,8 @@ const VERSION = require('./package.json').version;
 
 // Geographic centre of Taiwan; az/el from N2YO are relative to this point.
 const OBSERVER = { name: '台灣', lat: 23.6978, lng: 120.9605, alt: 0 };
+// 使用者的家（三峽），地球上畫一個標記；觀測點仍是台灣中心
+const HOME = { name: 'My Home', lat: 24.936545907612018, lng: 121.3762174543655 };
 
 const POSITIONS_SECONDS = 300; // N2YO maximum per request
 const POSITIONS_TTL = 200e3;   // the client refetches once under 90 s of data remains
@@ -632,7 +634,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method !== 'GET') { res.writeHead(405).end(); return; }
 
   if (pathname === '/api/config') {
-    sendJson(res, 200, { observer: OBSERVER, hasKey: Boolean(apiKey()), version: VERSION, twTiles: TW_TILES });
+    sendJson(res, 200, { observer: OBSERVER, home: HOME, hasKey: Boolean(apiKey()), version: VERSION, twTiles: TW_TILES });
     return;
   }
   if (pathname === '/api/starlink') {
