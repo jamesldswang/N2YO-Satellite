@@ -1582,25 +1582,11 @@ function applySpin(ms) {
 }
 $('spin-toggle').addEventListener('click', () => setSpin(!spin));
 
-// 太陽、月亮（sun-moon.js）：各自一個開關，記在這個瀏覽器。旁邊顯示從台灣看的仰角、方位（月亮再加月相）。
+// 太陽、月亮（sun-moon.js）：一直顯示（沒有開關）。設定列顯示從台灣看的仰角、方位（月亮再加月相）。
 const sunMoon = new SunMoon(scene, TEX);
+sunMoon.sunOn = sunMoon.moonOn = true;
 const sunLabel = makeLabel('place', '太陽');
 const moonLabel = makeLabel('place', '月亮');
-const SUN_KEY = 'sun-enabled', MOON_KEY = 'moon-enabled';
-function setSunShown(on) {
-  sunMoon.sunOn = on;
-  $('sun-toggle').setAttribute('aria-pressed', String(on));
-  $('sun-info').hidden = !on;
-  try { localStorage.setItem(SUN_KEY, on ? '1' : '0'); } catch { /* optional */ }
-  renderSunMoonInfo();
-}
-function setMoonShown(on) {
-  sunMoon.moonOn = on;
-  $('moon-toggle').setAttribute('aria-pressed', String(on));
-  $('moon-info').hidden = !on;
-  try { localStorage.setItem(MOON_KEY, on ? '1' : '0'); } catch { /* optional */ }
-  renderSunMoonInfo();
-}
 // 從台灣看的仰角、方位（world：場景座標）
 const topoDir = new THREE.Vector3();
 function lookFromTaiwan(world) {
@@ -1629,8 +1615,6 @@ function placeSunMoonLabels() {
   placeLabel(sunLabel, sunMoon.sunDrawPos, sunShown);
   placeLabel(moonLabel, sunMoon.moonPos, shown(sunMoon.moonOn, sunMoon.moonPos));
 }
-$('sun-toggle').addEventListener('click', () => setSunShown(!sunMoon.sunOn));
-$('moon-toggle').addEventListener('click', () => setMoonShown(!sunMoon.moonOn));
 
 // 太陽系示意模式（solar-system.js）：獨立的場景和鏡頭，地球畫面的東西全部隱藏，退出時原樣回來。
 // 行星公轉很慢，所以倍速上限提高到 SOLAR_MAX_SPEED；還在即時的話自動開 SOLAR_SIM_SPEED 倍（地球約 5 分鐘一圈），
@@ -1972,11 +1956,6 @@ async function start() {
   let spinOn = params.get('spin') === '1';
   try { spinOn ||= localStorage.getItem(SPIN_KEY) === '1'; } catch { /* optional */ }
   if (spinOn) setSpin(true);
-  for (const [key, param, set] of [[SUN_KEY, 'sun', setSunShown], [MOON_KEY, 'moon', setMoonShown]]) {
-    let on = params.get(param) === '1';
-    try { on ||= localStorage.getItem(key) === '1'; } catch { /* optional */ }
-    if (on) set(true);
-  }
   if (params.get('solar') === '1') setSolar(true);
   updateReplayButton();
 

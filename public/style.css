@@ -78,14 +78,14 @@ body.solar #labels, body.solar #altitude { display: none; }
 .starlink { display: flex; align-items: center; gap: 8px; }
 #starlink-toggle[aria-pressed="true"] { background: #d9f1ff; color: #0b1622; font-weight: 600; }
 #clouds-toggle[aria-pressed="true"] { background: #eef2f6; color: #0b1622; font-weight: 600; }
-#grid-toggle[aria-pressed="true"], #spin-toggle[aria-pressed="true"], #weather-toggle[aria-pressed="true"], #moon-toggle[aria-pressed="true"], #solar-toggle[aria-pressed="true"] { background: #eef2f6; color: #0b1622; font-weight: 600; }
+#grid-toggle[aria-pressed="true"], #spin-toggle[aria-pressed="true"], #weather-toggle[aria-pressed="true"], #solar-toggle[aria-pressed="true"] { background: #eef2f6; color: #0b1622; font-weight: 600; }
 #clouds-info.stale, #weather-info.stale { color: var(--accent); }
 #clouds-info.forecast { color: #9fd3ff; }
 #weather-legend { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; }
 #weather-legend[hidden] { display: none; }
 #weather-legend i { width: 64px; height: 8px; border-radius: 4px;
   background: linear-gradient(90deg, hsl(238 90% 55%), hsl(180 90% 55%), hsl(120 90% 55%), hsl(60 90% 55%), hsl(0 90% 55%)); }
-#sun-toggle[aria-pressed="true"] { background: #ffe6a3; color: #17130a; font-weight: 600; }
+#bar-tools .body-name { color: var(--text); font-size: 13px; padding: 0 2px; }
 #starlink-info, #clouds-info, #weather-info, #sun-info, #moon-info { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .sim { display: flex; align-items: center; gap: 8px; }
 #sim-toggle[aria-pressed="true"] { background: var(--accent); color: #17130a; font-weight: 600; }
