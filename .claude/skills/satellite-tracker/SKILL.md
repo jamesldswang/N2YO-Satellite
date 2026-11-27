@@ -157,5 +157,5 @@ description: 修改、測試「台灣上空衛星」網頁（D:\Personal_Git\sat
 - **模擬**：`sim`（`null` 或 `{ fromSim, fromReal, speed }`）、`clockMs()`、`setSim(speed | null, atMs?)`（`atMs` 指定從哪個時刻開始）。
 - **過境預報**：`markPassesDirty()`、`updatePasses()`（排程計算）、`renderPasses()`、`passRow()`、`dayHeading()`、`simulatePass(id, startMs)`、`setTab('list' | 'passes')`。結果在 `passResults`（`[{ id, geo, el, az, passes: [{ start, end, maxTime, maxEl, startAz, maxAz, endAz, visible, visStart, visEnd, visMaxEl }] }]`，時間都是毫秒）。
 - **星鏈**：`starlink`（`StarlinkLayer`）、`setStarlink(on)`、`renderStarlinkInfo()`。
-- **拉遠**：`controls.maxDistance = 170`（約 108 萬公里，看整個月球軌道）。`adjustSpaceCamera()` 的 `camera.far = max(400, dist × 2.5 + 100)`；`stars` 每幀跟著鏡頭、縮放到 far × 0.8（只是裝飾）。`farView()`（鏡頭離地心 > `FAR_VIEW_DIST` 40）時隱藏衛星圓圈 sprite 和名稱。
+- **拉遠**：`controls.maxDistance = 170`（約 108 萬公里，看整個月球軌道）。離地超過 `SOLAR_AUTO_KM`（40 萬 km）時 `autoSolar()`（frame() 在 `controls.update()` 後呼叫，飛行中不觸發）把鏡頭退到 `SOLAR_BACK_KM`（35 萬 km）再 `setSolar(true)`，所以實際上拉不到 maxDistance。`adjustSpaceCamera()` 的 `camera.far = max(400, dist × 2.5 + 100)`；`stars` 每幀跟著鏡頭、縮放到 far × 0.8（只是裝飾）。`farView()`（鏡頭離地心 > `FAR_VIEW_DIST` 40）時隱藏衛星圓圈 sprite 和名稱。
 - **主迴圈**：`frame()`（requestAnimationFrame）、`tickSlow()`（每 250 毫秒：時鐘、軌道線、清單、poll）。太陽方向 `updateSun(ms)` 在 frame() 開頭**每幀**呼叫（tickSlow 也呼叫一次）；只在 tickSlow 更新的話，高倍速和地球自轉時太陽會抖。和畫面位置有關的東西都要每幀更新。

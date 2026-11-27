@@ -1711,6 +1711,15 @@ function setSolar(on) {
 }
 $('solar-toggle').addEventListener('click', () => setSolar(!solarOn()));
 
+// 地球畫面拉遠到離地 SOLAR_AUTO_KM 以上就自動切到太陽系。切過去前先把鏡頭拉回 SOLAR_BACK_KM，
+// 之後按「地球」回來時才不會馬上又切走
+const SOLAR_AUTO_KM = 400000, SOLAR_BACK_KM = 350000;
+function autoSolar() {
+  if (camFly || otherView() || (camera.position.length() - 1) * EARTH_KM <= SOLAR_AUTO_KM) return;
+  camera.position.setLength(1 + SOLAR_BACK_KM / EARTH_KM);
+  setSolar(true);
+}
+
 // 月球視角（lunar.js）：獨立的場景和鏡頭，月球在中心，繞月衛星、地球、太陽在真實位置。
 // LRO 等低軌道衛星約 2 小時繞一圈，所以還在即時的話自動開 LUNAR_SIM_SPEED 倍（約 2 分鐘一圈）；
 // 退出時如果倍速還是這裡開的就回到即時。
@@ -2137,6 +2146,7 @@ function frame() {
     applyFly();
     adjustSpaceCamera();
     controls.update();
+    autoSolar();
     applyTilt();
     taiwanTiles?.update();
     photoTiles?.update();
