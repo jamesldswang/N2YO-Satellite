@@ -80,6 +80,7 @@ body.solar #labels, body.solar #altitude { display: none; }
 #clouds-toggle[aria-pressed="true"] { background: #eef2f6; color: #0b1622; font-weight: 600; }
 #grid-toggle[aria-pressed="true"], #spin-toggle[aria-pressed="true"], #weather-toggle[aria-pressed="true"], #moon-toggle[aria-pressed="true"], #solar-toggle[aria-pressed="true"] { background: #eef2f6; color: #0b1622; font-weight: 600; }
 #clouds-info.stale, #weather-info.stale { color: var(--accent); }
+#clouds-info.forecast { color: #9fd3ff; }
 #weather-legend { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; }
 #weather-legend[hidden] { display: none; }
 #weather-legend i { width: 64px; height: 8px; border-radius: 4px;

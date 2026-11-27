@@ -8,6 +8,11 @@ const REFRESH_MS = 10 * 60e3;   // 氣象署每 10 分鐘出一張
 const TEX_SIZE = 2750;          // 原圖 5500，縮一半（約 4 公里一格）省下 GPU 記憶體
 const HIST_TEX_SIZE = 2048;     // 回放用的歷史雲圖再小一點（約 5.5 公里一格），一次要留好幾張
 const MAX_CACHED = 4;           // 回放時最多留幾張歷史雲圖在 GPU（每張約 17 MB）
+// 短時外推：用最新一張和約 1 小時前的一張算出雲的移動，模擬到最新觀測之後時把雲往前推
+export const FORECAST_MAX_HOURS = 3; // 再久外推就不可靠（雲會生成、消散），app.js 改回「不隨模擬變化」
+const FLOW_GAP_MIN = 60;             // 理想的兩張間隔
+const FLOW_GAP_RANGE = [40, 90];     // 可接受的間隔（分鐘）
+const FLOW_STEPS = 4;                // shader 沿著移動場分幾段往回追
 
 async function makeTexture(blob, size) {
   const bitmap = await createImageBitmap(blob, { resizeWidth: size, resizeHeight: size, resizeQuality: 'high' });
@@ -32,9 +37,17 @@ export class CloudLayer {
     this.pending = new Set();   // 下載中的歷史檔名
     this.failed = new Set();    // 下載失敗的（例如已經超過 24 小時被刪掉），不再重試
     this.shown = null;          // 畫面上這張（live 或 cache 裡的某一張）
+    this.liveBlob = null;       // 最新一張的原檔（算移動場用）
+    this.flow = null;           // { t, tex, valid, gapMin, from }：對應 live.t 的移動場
+    this.flowBusy = false;
+    this.flowTried = 0;         // 上次嘗試的 live.t（失敗或沒有舊圖時不要一直重試）
+    this.flowWorker = null;
+    this.forecastHours = 0;     // 現在畫面外推了幾小時（app.js 顯示用）
     this.uniforms = {
       cloudMap: { value: null },
       opacity: { value: 1 },    // 模擬時間離觀測時間太遠時調淡（app.js 設定）
+      flowMap: { value: null }, // 移動場（uv / 小時），沒有時 fcHours = 0
+      fcHours: { value: 0 },    // 外推幾小時
       sunDir,                   // 和地球 shader 共用同一個 uniform，太陽位置一起動
     };
     this.mesh = new THREE.Mesh(
@@ -48,6 +61,7 @@ export class CloudLayer {
           void main() { vP = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
         fragmentShader: `
           uniform sampler2D cloudMap; uniform vec3 sunDir; uniform float opacity;
+          uniform sampler2D flowMap; uniform float fcHours;
           varying vec3 vP;
           const float DEG = 0.017453292519943295;
           const float SUB_LON = 140.7 * DEG;       // 向日葵 9 號的經度
@@ -72,6 +86,11 @@ export class CloudLayer {
             float x = atan(-r2 / r1) / DEG;
             float y = asin(-r3 / rn) / DEG;
             vec2 uv = vec2(0.5 + x * K, 0.5 + y * K);
+            // 外推：t 小時後這裡的雲，是現在「往上風處追回去」那裡的雲（分段沿著移動場走）
+            if (fcHours > 0.0) {
+              float h = fcHours / ${FLOW_STEPS}.0;
+              for (int i = 0; i < ${FLOW_STEPS}; i++) uv -= texture2D(flowMap, uv).xy * h;
+            }
             float v = texture2D(cloudMap, uv).r;
             // 實測（11 月清晨）：晴空海面約 0.24、台灣陸地 0.30、蒙古晴空陸地 0.42、
             // 華中雲帶 0.54、強對流 0.7 以上。單一紅外線頻道分不出很冷的地表和雲，
@@ -94,6 +113,8 @@ export class CloudLayer {
     this.enabled = true;
     this.mesh.visible = Boolean(this.shown);
     this.load();
+    this.flowTried = 0; // 關掉時可能錯過了，重新算
+    this.updateFlow();
     this.timer = setInterval(() => this.load(), REFRESH_MS);
   }
 
@@ -119,9 +140,12 @@ export class CloudLayer {
       this.status = '';
       if (this.live && this.live.t === t) return; // 還是同一張
       const old = this.live;
-      this.live = { tex: await makeTexture(await res.blob(), TEX_SIZE), t };
+      const blob = await res.blob();
+      this.live = { tex: await makeTexture(blob, TEX_SIZE), t };
+      this.liveBlob = blob;
       if (!this.shown || this.shown === old) this.display(this.live);
       if (old) disposeTex(old.tex);
+      this.updateFlow();
     } catch (err) {
       this.status = this.live ? '' : `雲圖載入失敗：${err.message}`;
       console.warn('雲圖載入失敗', err);
@@ -153,6 +177,65 @@ export class CloudLayer {
     }
     const next = frames[frames.indexOf(want) + 1]; // 回放時先把下一張載好，換圖才不會卡
     if (next && !this.cache.has(next.file)) this.fetchFrame(next);
+  }
+
+  // 每幀呼叫：ms = 模擬時鐘。畫面是最新一張、時鐘已經超過觀測時間、又有移動場時才外推。
+  // 即時模式不外推（畫面維持真正的觀測）。回傳外推的小時數（0 = 沒有外推）。
+  setForecast(ms, simulating) {
+    let h = 0;
+    if (this.enabled && simulating && this.flow && this.live && this.shown === this.live && this.flow.t === this.live.t) {
+      h = (ms - this.live.t) / 3600e3;
+      if (h <= 0 || h > FORECAST_MAX_HOURS) h = 0;
+    }
+    this.forecastHours = h;
+    this.uniforms.fcHours.value = h;
+    return h;
+  }
+
+  // 有新的最新雲圖就重算移動場：到伺服器的歷史清單找約 1 小時前的一張
+  async updateFlow() {
+    if (!this.enabled || this.flowBusy || !this.live || !this.liveBlob) return;
+    const t = this.live.t;
+    if (this.flowTried === t) return;
+    this.flowTried = t;
+    this.flowBusy = true;
+    try {
+      const res = await fetch('/api/history', { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const frames = (await res.json()).clouds || [];
+      let pick = null;
+      for (const f of frames) {
+        const gap = (t - f.t) / 60e3;
+        if (gap < FLOW_GAP_RANGE[0] || gap > FLOW_GAP_RANGE[1]) continue;
+        if (!pick || Math.abs(gap - FLOW_GAP_MIN) < Math.abs((t - pick.t) / 60e3 - FLOW_GAP_MIN)) pick = f;
+      }
+      if (!pick) { console.info('雲的外推：找不到約 1 小時前的雲圖，先不外推'); return; }
+      const oldRes = await fetch(`/api/clouds/history/${encodeURIComponent(pick.file)}`);
+      if (!oldRes.ok) throw new Error(`HTTP ${oldRes.status}`);
+      const oldBlob = await oldRes.blob();
+      const gapHours = (t - pick.t) / 3600e3;
+      this.flowWorker ??= new Worker('clouds-flow-worker.js');
+      const out = await new Promise((resolve) => {
+        this.flowWorker.onmessage = ({ data }) => resolve(data);
+        this.flowWorker.postMessage({ id: t, oldBlob, newBlob: this.liveBlob, gapHours });
+      });
+      if (out.error) throw new Error(out.error);
+      if (!this.live || this.live.t !== t) return; // 算的時候又來了新圖
+      const n = out.grid;
+      const half = new Uint16Array(n * n * 2);
+      for (let i = 0; i < half.length; i++) half[i] = THREE.DataUtils.toHalfFloat(out.flow[i]);
+      const tex = new THREE.DataTexture(half, n, n, THREE.RGFormat, THREE.HalfFloatType);
+      tex.minFilter = tex.magFilter = THREE.LinearFilter;
+      tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+      tex.needsUpdate = true;
+      this.flow?.tex.dispose();
+      this.flow = { t, tex, valid: out.valid, gapMin: Math.round(gapHours * 60), from: pick.t };
+      this.uniforms.flowMap.value = tex;
+    } catch (err) {
+      console.warn('雲的移動場計算失敗', err);
+    } finally {
+      this.flowBusy = false;
+    }
   }
 
   display(entry) {

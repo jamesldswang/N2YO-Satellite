@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/tools/session-sync.js\"",
+            "timeout": 60,
+            "statusMessage": "檢查是否和 GitHub 同步…"
+          }
+        ]
+      }
+    ]
+  }
+}

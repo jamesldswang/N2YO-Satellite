@@ -110,6 +110,7 @@ description: 修改、測試「台灣上空衛星」網頁（D:\Personal_Git\sat
   - 雲球只畫正面，所以在台灣仰望視角（相機在球裡面）看不到，不會擋住衛星。
   - 雲圖只有即時觀測：`renderCloudInfo()`（tickSlow 每 250 毫秒）比較 `clockMs()` 和 `clouds.obsTime`，差超過 `CLOUDS_STALE_MS`（1 小時）就把 `uniforms.opacity` 設 0.3、資訊改成黃字註明。
   - 開關存在 localStorage `clouds-enabled`，網址 `?clouds=1` 也能開。
+  - **短時外推**（`clouds-flow-worker.js`）：新的最新雲圖載入後 `updateFlow()` 自己抓 `/api/history`，找 40–90 分鐘前（最接近 60 分鐘）的一張，Worker 縮到 640 px 做區塊比對（17 px 區塊、搜尋 ±10 px、拋物線次像素、離群值剔除、高斯平滑、往無雲處外填），回傳 80×80 的位移（uv／小時，列 0 = 圖的最上面），存成 RG HalfFloat `flowMap`。shader 用 `fcHours` 沿移動場往回追 `FLOW_STEPS` 段（semi-Lagrangian）。`setForecast(ms, Boolean(sim))` 在 `frame()` 每幀呼叫：只有模擬中、畫面是最新一張、時鐘在觀測之後 `FORECAST_MAX_HOURS`（3）小時內才外推；即時模式不外推。`renderCloudInfo()` 依 `clouds.forecastHours` 顯示藍字並調淡。驗證方式：三張相隔 1 小時的真實雲圖，A→B 算移動場、B 外推 1 小時和 C 比，東亞有雲處平均誤差 12.1 對「不動」17.2。
 - **資料資料夾**（1.5.0 起）：`CACHE_DIR` = `.env` 的 `DATA_DIR`，預設 `%LOCALAPPDATA%\SatelliteTracker`。打包版每版是不同資料夾，放程式旁邊的話換版就丟歷史。啟動時 `migrateOldCache()` 把程式資料夾的舊 `.cache/` 複製過去（不覆蓋）。開發伺服器和打包版共用同一個資料夾。**測試一律設 `DATA_DIR` 到 scratchpad**，不要動使用者的資料。
 - **回放**：
   - 伺服器：每張新雲圖由 `archiveClouds()` 存成 `clouds-history/<觀測時間 UTC>Z.jpg`，保留 `CLOUDS_KEEP_HOURS`（24）小時，依檔名時間刪。`clouds-history` 存在就每 5 分鐘在背景 `getClouds()`（新圖每 10 分鐘一張，5 分鐘才不會漏）。`/api/history` 回傳 `{ starlink: [{t, file}], clouds: [...] }`；歷史檔用 `/api/starlink/history/<檔名>`（gzip 原檔加 `Content-Encoding: gzip`）、`/api/clouds/history/<檔名>`，檔名一律用 `HISTORY_NAME` 檢查。

@@ -80,7 +80,8 @@
 - 紅外線圖越亮代表越冷：雲頂越高越白，晴空的海面和陸地比較暗。頁面把亮度轉成雲的濃淡，所以晚上也看得到雲。
 - 只有向日葵看得到的那半個地球有雲（大約東經 50° 到西經 140°），越靠邊緣越淡。
 - 伺服器記住最新的一張，10 分鐘內不重複下載；下載失敗就繼續用舊的。
-- 雲圖只有最新的觀測。加速模擬或跳到過境時間，模擬時刻和觀測時間差超過 1 小時，雲會變淡，旁邊改成黃字「雲圖為 HH:MM 的即時觀測，不隨模擬變化」；回到即時就恢復。
+- **短時外推**：加速模擬到最新觀測之後的 3 小時內，雲會依移動方向往前推。網頁用最新一張和約 1 小時前的一張（伺服器的雲圖歷史）做區塊比對，算出每個地方的雲往哪裡、多快移動（Web Worker，約 0.6 秒），再沿著這個移動場把雲推到模擬時刻；旁邊顯示藍字「雲圖外推 +N 分鐘」，外推越久越淡。只是把現在的雲搬過去，**不會預測雲的生成或消散**，僅供參考。實測 1 小時外推比「雲不動」的誤差少約 30%。即時模式不外推，畫面維持真正的觀測。
+- 超過 3 小時、或還沒有約 1 小時前的雲圖（例如伺服器剛開）時不外推：模擬時刻和觀測時間差超過 1 小時，雲會變淡，旁邊改成黃字「雲圖為 HH:MM 的觀測，不隨模擬變化」；回到即時就恢復。
 
 ### 溫度／風
 
@@ -282,6 +283,7 @@ NORAD 編號可以在 [n2yo.com](https://www.n2yo.com/) 或 [CelesTrak](https://
 | 肉眼可見的條件 | `public/passes.js` | `compute()` 裡的太陽仰角 `-6`、衛星仰角 `10` |
 | 模擬倍速範圍、預設倍速 | `public/index.html` | `<input id="sim-speed">` 的 `min`、`max`、`value`（`<output id="sim-rate">` 的文字也要跟著改） |
 | 雲圖的濃淡門檻、夜晚亮度 | `public/clouds.js` | shader 裡的 `smoothstep(0.38, 0.68, v)`、`mix(0.34, …)` |
+| 雲的外推時間上限、比對間隔 | `public/clouds.js` | `FORECAST_MAX_HOURS = 3`、`FLOW_GAP_MIN = 60` |
 | 資料資料夾位置 | `.env` | `DATA_DIR=`（預設 `%LOCALAPPDATA%\SatelliteTracker`） |
 | 雲圖歷史保留時間 | `.env` | `CLOUDS_KEEP_HOURS=24` |
 | 星鏈歷史保留時間 | `.env` | `STARLINK_KEEP_DAYS=30` |
@@ -323,6 +325,7 @@ satellite-tracker/
 │   ├── sat-info.js    # 衛星簡介（追蹤清單和加入選單 hover 時顯示）、加入選單的衛星目錄
 │   ├── weather.js     # 溫度／風圖層（氣象署測站的氣溫點、風向箭頭）
 │   ├── clouds.js      # 衛星雲圖圖層（氣象署向日葵紅外線雲圖，shader 換算靜止衛星投影；回放時換成歷史雲圖）
+│   ├── clouds-flow-worker.js # 雲的移動場（Web Worker，兩張雲圖區塊比對，給短時外推用）
 │   ├── passes.js      # 過境預報演算法（頁面和測試工具共用）
 │   ├── passes-worker.js  # 在背景執行緒計算過境預報
 │   ├── style.css      # 樣式
@@ -333,6 +336,7 @@ satellite-tracker/
 │   ├── make-sea-mask.py  # 產生台灣外海遮罩（Python + numpy + Pillow，只在改範圍時用）
 │   ├── make-coastline.py # 從 Natural Earth 產生台灣海岸線 public/taiwan-coast.json
 │   ├── release.sh     # 發布 GitHub Release 並上傳 zip
+│   ├── session-sync.js  # Claude Code 開專案時的 hook（.claude/settings.json）：git fetch，落後且乾淨就自動 pull，否則提醒
 │   └── release-body.js  # 產生 Release 說明文字（release.sh 會呼叫）
 ├── build.js           # 打包腳本（npm run dist）
 ├── start.cmd          # 啟動檔：有視窗，關掉就停止

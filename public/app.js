@@ -6,7 +6,7 @@ import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { makeSatModel, modelKind, setModelLit, disposeModel } from './models.js';
 import { StarlinkLayer } from './starlink.js';
-import { CloudLayer } from './clouds.js';
+import { CloudLayer, FORECAST_MAX_HOURS } from './clouds.js';
 import { WeatherLayer } from './weather.js';
 import { satInfo, CATALOG, initialName } from './sat-info.js';
 import { makeTail, setTailPoints, disposeTail, tailResolution, TAIL_POINTS } from './tail.js';
@@ -1207,7 +1207,8 @@ function renderStarlinkInfo() {
 }
 $('starlink-toggle').addEventListener('click', () => setStarlink(!starlink.enabled));
 
-// 氣象署衛星雲圖：預設關閉，開關記在這個瀏覽器。雲圖是即時觀測，加速模擬時不會跟著時間變。
+// 氣象署衛星雲圖：預設關閉，開關記在這個瀏覽器。雲圖是即時觀測；加速模擬到最新觀測之後，
+// FORECAST_MAX_HOURS 小時內用雲的移動外推（clouds.js），再久就不隨模擬變化。
 const clouds = new CloudLayer(scene, earthUniforms.sunDir);
 const CLOUDS_KEY = 'clouds-enabled';
 function setClouds(on) {
@@ -1226,8 +1227,11 @@ function renderCloudInfo() {
   let stale = false;
   if (!text && clouds.obsTime) {
     const hm = clouds.obsTime.toLocaleTimeString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false, hour: '2-digit', minute: '2-digit' });
-    stale = Math.abs(clockMs() - clouds.obsTime.getTime()) > CLOUDS_STALE_MS;
-    if (stale) {
+    const fc = clouds.forecastHours;
+    stale = !fc && Math.abs(clockMs() - clouds.obsTime.getTime()) > CLOUDS_STALE_MS;
+    if (fc) {
+      text = `雲圖外推 +${Math.round(fc * 60)} 分鐘（由 ${hm} 觀測和 ${clouds.flow.gapMin} 分鐘前的移動推算，僅供參考）`;
+    } else if (stale) {
       text = `雲圖為 ${hm} 的觀測，不隨模擬變化`;
     } else if (sim) {
       text = `雲圖 ${hm}`;
@@ -1236,8 +1240,10 @@ function renderCloudInfo() {
       text = `觀測 ${hm}（${ago} 分鐘前）`;
     }
   }
-  clouds.uniforms.opacity.value = stale ? 0.3 : 1;
+  // 外推越久越不準，慢慢調淡（3 小時時 0.55）
+  clouds.uniforms.opacity.value = stale ? 0.3 : 1 - 0.45 * (clouds.forecastHours / FORECAST_MAX_HOURS);
   $('clouds-info').classList.toggle('stale', stale);
+  $('clouds-info').classList.toggle('forecast', clouds.forecastHours > 0);
   if ($('clouds-info').textContent !== text) $('clouds-info').textContent = text;
 }
 $('clouds-toggle').addEventListener('click', () => setClouds(!clouds.enabled));
@@ -1885,6 +1891,7 @@ function frame() {
     taiwanTiles?.update();
   } else aimSky();
   weather.update(view === 'space' && !hiddenByEarth(up.clone().multiplyScalar(1.001)));
+  clouds.setForecast(ms, Boolean(sim)); // 每幀更新外推時間，高倍速時雲才會連續移動
   renderAltitude();
   updateStationTip();
   starlink.updateModels(camera, canvas.clientHeight, earthUniforms.sunDir.value);
